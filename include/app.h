@@ -1,10 +1,9 @@
 #pragma once
 
-#include <atomic>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
-#include <thread>
 
 #include "ai_player.h"
 #include "configuration.h"
@@ -37,6 +36,8 @@ class App {
   // Window / ImGui lifecycle.
   bool Init();
   void Shutdown();
+  // Finish and discard an obsolete background result before changing AI state.
+  void WaitForAI();
 
   // Per-frame orchestration.
   void RenderFrame();
@@ -55,9 +56,6 @@ class App {
 
   // Active game (alive during kPlaying and kGameOver).
   std::unique_ptr<Game> game_;
-  // Position of the most recently placed stone (for the indicator dot).
-  int last_row_ = -1;
-  int last_col_ = -1;
   // Sealed record after the game ends.
   std::optional<GameRecord> finished_record_;
 
@@ -78,10 +76,9 @@ class App {
   int  settings_time_seconds_ = 60;
 
   // ── AI game fields ──────────────────────────────────────────────────────────
-  bool                      is_ai_game_      = false;
-  Player                    ai_color_        = Player::kWhite;
+  bool is_ai_game_ = false;
+  Player ai_color_ = Player::kWhite;
   std::unique_ptr<AIPlayer> ai_player_;
-  std::thread               ai_thread_;
-  std::atomic<int>          ai_pending_move_{-1};
-  std::atomic<bool>         ai_thinking_{false};
+  std::future<std::optional<Action>> ai_result_;
+  std::string ai_error_msg_;
 };

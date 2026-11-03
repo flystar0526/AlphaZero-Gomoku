@@ -1,29 +1,30 @@
 #pragma once
 
-#include <string>
+#include <memory>
+#include <optional>
 
-#include "alpha_zero.h"
 #include "mcts.h"
-#include "mcts_state.h"
 
-// AI player: MCTS + AlphaZero.
-// PickMove() is called from a background thread; all other methods from main.
+// Coordinates MCTS simulations and selects moves for the AI player.
+// Not thread-safe; all calls must be serialized by the caller.
 class AIPlayer {
  public:
-  explicit AIPlayer(const std::string& model_path, float c_puct = 5.0f,
-                    int n_playout = 400);
+  explicit AIPlayer(std::unique_ptr<PolicyValueEvaluator> evaluator,
+                    SearchOptions options = {});
+  AIPlayer(const AIPlayer&) = delete;
+  AIPlayer& operator=(const AIPlayer&) = delete;
 
-  // Runs MCTS and returns the best action (flat index row*15+col).
-  // Also advances the internal tree root to the chosen move.
-  int PickMove(const MCTSState& state);
+  // Searches from `position` and returns the most visited move, or std::nullopt
+  // if the position is terminal. Does not advance the internal search tree.
+  std::optional<Action> PickMove(const GamePosition& position);
 
-  // Advances MCTS tree after the opponent's (human) move.
-  void NotifyMove(int last_move);
+  // Synchronizes the search tree after a move is played on the board.
+  void ObserveMove(Action action);
 
-  // Resets MCTS tree; call on new game or after undo.
+  // Clears the search tree (required on new game or undo).
   void Reset();
 
  private:
-  AlphaZero net_;
+  std::unique_ptr<PolicyValueEvaluator> evaluator_;
   MCTS mcts_;
 };

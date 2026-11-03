@@ -1,8 +1,6 @@
 #pragma once
 
-// move_record.h — plain data types shared across the project.
-
-enum class Player { kBlack, kWhite };
+#include "board.h"
 
 struct MoveRecord {
   int move_number;  // 1-indexed

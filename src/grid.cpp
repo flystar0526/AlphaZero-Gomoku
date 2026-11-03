@@ -57,28 +57,28 @@ std::pair<int, int> DrawBoardImpl(const Board& board, bool interactive,
 
   const float sz = Grid::kCanvasSize;
 
-  // ── Background ──────────────────────────────────────────────────────────
+  // Background
   dl->AddRectFilled(origin, {origin.x + sz, origin.y + sz}, kBoardBg, 4.0f);
 
-  // ── Grid lines ──────────────────────────────────────────────────────────
-  for (int i = 0; i < Board::kSize; ++i) {
+  // Grid lines
+  for (int i = 0; i < kBoardSize; ++i) {
     // Vertical line at column i.
     ImVec2 a = IntersectionPos(origin, 0, i);
-    ImVec2 b = IntersectionPos(origin, Board::kSize - 1, i);
+    ImVec2 b = IntersectionPos(origin, kBoardSize - 1, i);
     dl->AddLine(a, b, kLineColor, 1.0f);
     // Horizontal line at row i.
     ImVec2 c = IntersectionPos(origin, i, 0);
-    ImVec2 d = IntersectionPos(origin, i, Board::kSize - 1);
+    ImVec2 d = IntersectionPos(origin, i, kBoardSize - 1);
     dl->AddLine(c, d, kLineColor, 1.0f);
   }
 
-  // ── Star points ─────────────────────────────────────────────────────────
+  // Star points
   for (auto& sp : kStarPoints) {
     ImVec2 center = IntersectionPos(origin, sp[0], sp[1]);
     dl->AddCircleFilled(center, 4.0f, kStarColor, 12);
   }
 
-  // ── Hover preview (before stones so it's behind) ────────────────────────
+  // Hover preview (drawn before stones so it sits behind them)
   int hover_row = -1, hover_col = -1;
   if (interactive && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
                                             ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
@@ -88,8 +88,8 @@ std::pair<int, int> DrawBoardImpl(const Board& board, bool interactive,
     // Round to nearest intersection.
     int col = static_cast<int>(rel_x / Grid::kCellSize + 0.5f);
     int row = static_cast<int>(rel_y / Grid::kCellSize + 0.5f);
-    if (row >= 0 && row < Board::kSize && col >= 0 && col < Board::kSize) {
-      if (board.GetCell(row, col) == Cell::kEmpty) {
+    if (IsValidCell(row, col)) {
+      if (board.GetCell(ToAction(row, col)) == Cell::kEmpty) {
         hover_row = row;
         hover_col = col;
         ImVec2 center = IntersectionPos(origin, row, col);
@@ -99,10 +99,10 @@ std::pair<int, int> DrawBoardImpl(const Board& board, bool interactive,
     }
   }
 
-  // ── Stones ──────────────────────────────────────────────────────────────
-  for (int r = 0; r < Board::kSize; ++r) {
-    for (int c = 0; c < Board::kSize; ++c) {
-      Cell cell = board.GetCell(r, c);
+  // Stones
+  for (int r = 0; r < kBoardSize; ++r) {
+    for (int c = 0; c < kBoardSize; ++c) {
+      Cell cell = board.GetCell(ToAction(r, c));
       if (cell != Cell::kEmpty) {
         ImVec2 center = IntersectionPos(origin, r, c);
         DrawStone(dl, center, cell);
@@ -110,16 +110,16 @@ std::pair<int, int> DrawBoardImpl(const Board& board, bool interactive,
     }
   }
 
-  // ── Last-move indicator ──────────────────────────────────────────────────
+  // Last-move indicator
   if (last_row >= 0 && last_col >= 0) {
     ImVec2 center = IntersectionPos(origin, last_row, last_col);
     dl->AddCircleFilled(center, 4.5f, kLastMoveDot, 12);
   }
 
-  // ── Reserve layout space ────────────────────────────────────────────────
+  // Reserve layout space
   ImGui::Dummy({sz, sz});
 
-  // ── Click detection ─────────────────────────────────────────────────────
+  // Click detection
   if (interactive && ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
     if (hover_row >= 0) {
       return {hover_row, hover_col};

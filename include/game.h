@@ -3,62 +3,57 @@
 #include <chrono>
 #include <optional>
 
-#include "board.h"
 #include "configuration.h"
+#include "game_position.h"
 #include "game_record.h"
 #include "move_record.h"
 
-// Non-blocking game state machine for use with an ImGui immediate-mode loop.
-// Callers must call Update() every frame and check state() for the outcome.
+// Non-blocking game session controller for an immediate-mode GUI loop.
 class Game {
  public:
-  enum class State { kPlaying, kWin, kDraw, kTimeout };
+  enum class State { kPlaying, kWin, kDraw, kTimeout, kForfeit };
 
   explicit Game(const Configuration& config);
 
-  // Resets the board and starts a fresh game; Black moves first.
+  // Resets the board, record, and timers for a new game.
   void Start();
 
-  // Must be called every frame. Checks the turn timer and transitions
-  // to kTimeout automatically when time runs out.
+  // Checks the turn timer and transitions to kTimeout if time expired.
   void Update();
 
-  // Attempts to place a stone at (row, col) for the current player.
-  // Returns true and advances the turn on success.
-  // No-op (returns false) if the game is not in kPlaying state or the
-  // cell is invalid / occupied.
+  // Plays a move at (row, col) if legal and the game is ongoing.
   bool TryPlaceStone(int row, int col);
 
-  // Undoes the last two half-moves so the same player moves again.
-  // Requires undo to be enabled and at least two moves on record.
+  // Reverts the last full turn (two plies) so the same player moves again.
   void Undo();
 
-  // Builds and returns the completed GameRecord.
-  // Must only be called after the game is over (state != kPlaying).
+  // Ends the game immediately with the opponent as winner.
+  void Forfeit();
+
+  // Seals and returns the game record. Requires the game to have ended.
   GameRecord FinalizeRecord();
 
-  // ── Accessors ────────────────────────────────────────────────────────────
+  // Returns remaining turn time in seconds, or -1.0f if the timer is disabled.
+  float GetSecondsRemaining() const;
+
   State state() const { return state_; }
-  Player current_player() const { return current_player_; }
-  const Board& board() const { return board_; }
-  int move_number() const { return move_number_; }
+  Player current_player() const { return position_.current_player(); }
+  const Board& board() const { return position_.board(); }
+  const GamePosition& position() const { return position_; }
+  int next_move_number() const { return record_.size() + 1; }
   std::optional<Player> winner() const { return winner_; }
-
-  // Returns fractional seconds remaining this turn, or -1.0f if disabled.
-  float seconds_remaining() const;
-
   const GameRecord& record() const { return record_; }
 
  private:
-  const Configuration& config_;
-  Board board_;
+  using Clock = std::chrono::steady_clock;
+
+  Configuration config_;
+  GamePosition position_;
   GameRecord record_;
 
   State state_ = State::kPlaying;
-  Player current_player_ = Player::kBlack;
-  int move_number_ = 1;
   std::optional<Player> winner_;
 
-  std::chrono::steady_clock::time_point turn_start_;
-  std::chrono::steady_clock::time_point game_start_;
+  Clock::time_point turn_start_time_;
+  Clock::time_point game_start_time_;
 };

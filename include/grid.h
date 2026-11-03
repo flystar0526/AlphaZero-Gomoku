@@ -30,5 +30,5 @@ class Grid {
 
   // Total canvas size for one axis: 14 gaps + 2 padding.
   static constexpr float kCanvasSize =
-      kBoardPadding * 2.0f + (Board::kSize - 1) * kCellSize;
+      kBoardPadding * 2.0f + (kBoardSize - 1) * kCellSize;
 };

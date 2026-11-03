@@ -80,6 +80,36 @@ Use the main menu to choose a mode. Everything is mouse-driven:
 
 **Player vs AI** requires a TorchScript model file at `model/alpha-zero.pt` (relative to the working directory), a CUDA-capable NVIDIA GPU, and a driver compatible with CUDA 13.0. The model always runs on CUDA; initialization fails if CUDA is unavailable.
 
+The bundled model is the three-channel `best_checkpoint.pt` export from the training project. Its single-position input is float32 `[1, 3, 15, 15]`:
+
+| Channel | Contents |
+|---|---|
+| 0 | Stones belonging to the side to move |
+| 1 | Opponent stones |
+| 2 | A one at the last move, or all zeros on an empty board |
+
+Coordinates are used directly, with action index `row * 15 + col`; there is no flip or transpose. The model returns a tuple of log-policy `[1, 225]` and value `[1, 1]`, with value measured from the side to move. Older nine-channel models are incompatible. Loading and inference errors are shown in the main menu.
+
+Search currently evaluates one position at a time. The GUI keeps one background AI job; batched inference and parallel MCTS are not implemented.
+
+### Core Design
+
+- `Board` owns cells and shared board rules. It has no turn, model or record state.
+- `GamePosition` combines a Board with the side to move, last move and result. `PlayMove(action)` requires a legal action in an ongoing position; debug assertions enforce this precondition. Undo and replay share `GamePosition::Rebuild`.
+- `Game` handles input validation, clocks, forfeit and move records; search copies positions without move histories. ReplayController validates move sequences after FileManager parses the file.
+- `PolicyValueNetwork` owns three-channel feature encoding and the TorchScript backend (defaulting to CUDA for gameplay, with CPU support for headless contract tests). Its header also declares the small `PolicyValueEvaluator` interface used to test MCTS without a GPU. `AIPlayer` selects a move; the caller commits it with `ObserveMove` only after the game accepts the move. Search, ObserveMove and Reset must run serially.
+
+### Tests
+
+CTest targets are built by default (`-DBUILD_TESTING=OFF` disables them):
+
+```bash
+cmake --build build -j$(nproc)
+ctest --test-dir build --output-on-failure
+```
+
+Core tests cover board rules, feature orientation, undo, replay validation, search priors, value perspective and tree reuse. The checkpoint contract test loads the real model on CPU for format verification. The CUDA backend smoke test is explicitly skipped when a GPU is unavailable; this does not enable CPU inference in the game. The existing Linux/CUDA build requirements still apply.
+
 ### Timer
 
 When a per-move time limit is enabled, the countdown is shown in the top bar. If a player's time runs out the opponent wins automatically — no input required.

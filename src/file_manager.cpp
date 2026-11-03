@@ -2,7 +2,9 @@
 
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <utility>
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -84,7 +86,8 @@ bool FileManager::Save(const GameRecord& record, const std::string& path) {
 // FileManager::Load
 // ---------------------------------------------------------------------------
 
-bool FileManager::Load(const std::string& path, GameRecord* record) {
+bool FileManager::Load(const std::string& path, GameRecord* record) try {
+  if (!record) return false;
   std::ifstream in(path);
   if (!in.is_open()) return false;
 
@@ -145,9 +148,16 @@ bool FileManager::Load(const std::string& path, GameRecord* record) {
     }
   }
 
-  if (!metadata_complete) return false;
+  if (!metadata_complete || meta.total_moves != static_cast<int>(moves.size()))
+    return false;
 
-  record->Finalize(meta);
-  for (const auto& m : moves) record->AddMove(m);
+  GameRecord loaded;
+  loaded.Finalize(meta);
+  for (const auto& m : moves) loaded.AddMove(m);
+  *record = std::move(loaded);
   return true;
+} catch (const std::invalid_argument&) {
+  return false;
+} catch (const std::out_of_range&) {
+  return false;
 }

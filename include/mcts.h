@@ -1,65 +1,50 @@
 #pragma once
 
-#include <map>
 #include <memory>
-#include <utility>
 #include <vector>
 
-#include "alpha_zero.h"
-#include "mcts_state.h"
+#include "game_position.h"
+#include "policy_value_network.h"
 
-// ---------------------------------------------------------------------------
-// TreeNode
-// ---------------------------------------------------------------------------
-
-struct TreeNode {
-  TreeNode* parent = nullptr;
-  std::map<int, std::unique_ptr<TreeNode>> children;
-
-  int n_visits = 0;
-  float q_value = 0.f;
-  float prior_p = 1.f;
-
-  explicit TreeNode(TreeNode* parent, float prior_p);
-
-  bool is_leaf() const { return children.empty(); }
-
-  // PUCB selection: returns {best_action, best_child_ptr}.
-  std::pair<int, TreeNode*> Select(float c_puct) const;
-
-  // Expands this leaf with the given (action, prior_prob) pairs.
-  void Expand(const std::vector<std::pair<int, float>>& action_priors);
-
-  // Backs up leaf_value through the tree (sign alternates each level).
-  void BackProgate(float leaf_value);
-
- private:
-  void Update(float leaf_value);
-  float PUCBScore(float c_puct) const;
+// Hyperparameters controlling MCTS exploration and simulation budget.
+struct SearchOptions {
+  float c_puct = 5.0f;
+  int num_playouts = 400;
 };
 
-// ---------------------------------------------------------------------------
-// MCTS
-// ---------------------------------------------------------------------------
+// Search statistics for a candidate move at the root position.
+struct MoveVisits {
+  Action action = -1;
+  int visits = 0;
+  float prior = 0.0f;
+  float value = 0.0f;  // Mean value (Q) from the current player's perspective.
+};
 
+// Stateful Monte Carlo Tree Search engine with subtree reuse.
+// All calls must be serialized; call Reset() after undo or starting a new game.
 class MCTS {
  public:
-  float c_puct = 5.0f;
-  int n_playout = 400;
+  explicit MCTS(SearchOptions options = {});
+  MCTS(const MCTS&) = delete;
+  MCTS& operator=(const MCTS&) = delete;
+  ~MCTS();
 
-  explicit MCTS(float c_puct = 5.0f, int n_playout = 400);
+  // Runs simulations from `position` and returns statistics for all legal moves.
+  std::vector<MoveVisits> Search(const GamePosition& position,
+                                 PolicyValueEvaluator& evaluator);
 
-  // Runs one playout from a copy of state (state passed by value
-  // intentionally).
-  void Playout(MCTSState state, const AlphaZero& net);
+  // Advances the root to the child matching `action` to reuse its subtree.
+  void ObserveMove(Action action);
 
-  // Runs n_playout playouts and returns {action, visit_count} pairs.
-  std::vector<std::pair<int, int>> GetMoveVisits(const MCTSState& state,
-                                                 const AlphaZero& net);
-
-  // Advances the root to last_move (reuses subtree). Pass -1 to reset.
-  void UpdateWithMove(int last_move);
+  // Discards the current search tree and initializes a fresh root node.
+  void Reset();
 
  private:
+  struct TreeNode;
+
+  // Executes a single selection, expansion, evaluation, and backup pass.
+  void Playout(GamePosition position, PolicyValueEvaluator& evaluator);
+
+  SearchOptions options_;
   std::unique_ptr<TreeNode> root_;
 };

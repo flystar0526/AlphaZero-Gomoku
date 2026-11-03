@@ -1,26 +1,34 @@
 #include "ai_player.h"
 
-AIPlayer::AIPlayer(const std::string& model_path, float c_puct, int n_playout)
-    : net_(model_path), mcts_(c_puct, n_playout) {}
+#include <algorithm>
+#include <stdexcept>
+#include <tuple>
+#include <utility>
+#include <vector>
 
-int AIPlayer::PickMove(const MCTSState& state) {
-  auto move_visits = mcts_.GetMoveVisits(state, net_);
-
-  int best_act = move_visits[0].first;
-  int best_cnt = move_visits[0].second;
-
-  for (auto& [act, cnt] : move_visits) {
-    if (cnt > best_cnt) {
-      best_cnt = cnt;
-      best_act = act;
-    }
+AIPlayer::AIPlayer(std::unique_ptr<PolicyValueEvaluator> evaluator,
+                   SearchOptions options)
+    : evaluator_(std::move(evaluator)), mcts_(options) {
+  if (!evaluator_) {
+    throw std::invalid_argument("AI requires a non-null evaluator");
   }
-
-  mcts_.UpdateWithMove(best_act);
-
-  return best_act;
 }
 
-void AIPlayer::NotifyMove(int last_move) { mcts_.UpdateWithMove(last_move); }
+std::optional<Action> AIPlayer::PickMove(const GamePosition& position) {
+  const std::vector<MoveVisits> candidates = mcts_.Search(position, *evaluator_);
+  if (candidates.empty()) return std::nullopt;
 
-void AIPlayer::Reset() { mcts_.UpdateWithMove(-1); }
+  // Select the move with the highest visit count, breaking ties by higher
+  // prior probability and then smaller action index for deterministic play.
+  const auto best_move = std::max_element(
+      candidates.begin(), candidates.end(),
+      [](const MoveVisits& a, const MoveVisits& b) {
+        return std::make_tuple(a.visits, a.prior, -a.action) <
+               std::make_tuple(b.visits, b.prior, -b.action);
+      });
+  return best_move->action;
+}
+
+void AIPlayer::ObserveMove(Action action) { mcts_.ObserveMove(action); }
+
+void AIPlayer::Reset() { mcts_.Reset(); }
