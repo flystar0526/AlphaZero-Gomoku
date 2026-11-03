@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -13,9 +14,9 @@
 #include <vector>
 
 #include "ai_player.h"
-#include "policy_value_network.h"
 #include "file_manager.h"
 #include "game.h"
+#include "policy_value_network.h"
 #include "replay_controller.h"
 
 namespace {
@@ -251,6 +252,144 @@ void GameUndoAndReplay() {
   CHECK(timeout_game.board().stone_count() == 0);
 }
 
+// Verifies role queries, human-only timers, and mode-specific undo/metadata.
+void GameModesAndTimers() {
+  Configuration config;
+  config.set_time_limit_enabled(true);
+  config.set_time_limit_seconds(60);
+  config.set_undo_enabled(true);
+
+  Game human(config);
+  CHECK(human.mode() == Game::Mode::kPlayerVsPlayer);
+  CHECK(!human.IsAIPlayer(Player::kBlack));
+  CHECK(!human.IsAIPlayer(Player::kWhite));
+  CHECK(human.GetSecondsRemaining() > 0.0f);
+  CHECK(human.TryPlaceStone(7, 7));
+  CHECK(human.GetSecondsRemaining() > 0.0f);
+
+  Game mixed(config, Game::Mode::kPlayerVsAI);
+  CHECK(!mixed.IsAIPlayer(Player::kBlack));
+  CHECK(mixed.IsAIPlayer(Player::kWhite));
+  CHECK(mixed.GetSecondsRemaining() > 0.0f);
+  CHECK(mixed.TryPlaceStone(7, 7));
+  CHECK(mixed.GetSecondsRemaining() == -1.0f);
+  mixed.Update();  // Disabled timer sentinel on AI turns must not time out.
+  CHECK(mixed.state() == Game::State::kPlaying);
+  CHECK(mixed.TryPlaceStone(7, 8));
+  CHECK(mixed.GetSecondsRemaining() > 59.0f);
+  mixed.Undo();
+  CHECK(mixed.board().stone_count() == 0);
+  CHECK(mixed.GetSecondsRemaining() > 59.0f);
+  mixed.Forfeit();
+  CHECK(mixed.FinalizeRecord().metadata().time_limit_enabled);
+
+  config.set_time_limit_seconds(0);
+  Game zero_time_human(config, Game::Mode::kPlayerVsAI);
+  zero_time_human.Update();
+  CHECK(zero_time_human.state() == Game::State::kTimeout);
+  CHECK(zero_time_human.winner() == Player::kWhite);
+
+  Game self_play(config, Game::Mode::kAIvsAI);
+  CHECK(self_play.IsAIPlayer(Player::kBlack));
+  CHECK(self_play.IsAIPlayer(Player::kWhite));
+  for (int col = 0; col < 4; ++col) {
+    CHECK(self_play.GetSecondsRemaining() == -1.0f);
+    self_play.Update();
+    CHECK(self_play.state() == Game::State::kPlaying);
+    CHECK(self_play.TryPlaceStone(7, col));
+    CHECK(self_play.TryPlaceStone(0, col));
+  }
+  self_play.Undo();  // Undo is disabled in AI vs AI.
+  CHECK(self_play.record().size() == 8);
+  CHECK(self_play.TryPlaceStone(7, 4));
+  CHECK(self_play.state() == Game::State::kWin);
+  const auto record = self_play.FinalizeRecord();
+  CHECK(!record.metadata().time_limit_enabled);
+  CHECK(!record.metadata().undo_enabled);
+  CHECK(config.time_limit_enabled());
+  CHECK(config.undo_enabled());
+  self_play.Start();
+  CHECK(self_play.mode() == Game::Mode::kAIvsAI);
+  CHECK(self_play.GetSecondsRemaining() == -1.0f);
+  CHECK(self_play.record().size() == 0);
+}
+
+// Verifies loading, saving, and validation of per-color AI search options.
+void AIConfiguration() {
+  // Isolate gomoku.cfg so tests cannot overwrite the user's settings.
+  const auto original = std::filesystem::current_path();
+  const auto directory =
+      original / ("test-ai-config-" +
+                  std::to_string(std::chrono::steady_clock::now()
+                                     .time_since_epoch()
+                                     .count()));
+  std::filesystem::create_directory(directory);
+  struct Cleanup {
+    std::filesystem::path original, directory;
+    ~Cleanup() {
+      std::filesystem::current_path(original);
+      std::error_code ec;
+      std::filesystem::remove_all(directory, ec);
+    }
+  } cleanup{original, directory};
+  std::filesystem::current_path(directory);
+
+  Configuration defaults;
+  for (Player color : {Player::kBlack, Player::kWhite}) {
+    CHECK(defaults.ai_options(color).num_playouts == 400);
+    CHECK(Near(defaults.ai_options(color).c_puct, 5.0f));
+  }
+  {
+    std::ofstream("gomoku.cfg")
+        << "undo_enabled = true\ntime_limit_seconds = 30\n";
+  }
+  Configuration legacy;
+  CHECK(legacy.undo_enabled());
+  CHECK(legacy.time_limit_seconds() == 30);
+  CHECK(legacy.ai_options(Player::kBlack).num_playouts == 400);
+  CHECK(Near(legacy.ai_options(Player::kWhite).c_puct, 5.0f));
+
+  legacy.set_ai_options(Player::kBlack, {1.2345678f, 7});
+  legacy.set_ai_options(Player::kWhite, {8.7654321f, 19});
+  legacy.Save();
+  Configuration restored;
+  for (Player color : {Player::kBlack, Player::kWhite}) {
+    CHECK(restored.ai_options(color).num_playouts ==
+          legacy.ai_options(color).num_playouts);
+    CHECK(restored.ai_options(color).c_puct == legacy.ai_options(color).c_puct);
+  }
+  CHECK(restored.undo_enabled());
+  CHECK(restored.time_limit_seconds() == 30);
+
+  for (SearchOptions invalid :
+       {SearchOptions{0.0f, 1}, SearchOptions{-1.0f, 1},
+        SearchOptions{5.0f, 0}, SearchOptions{5.0f, -1},
+        SearchOptions{std::numeric_limits<float>::infinity(), 1},
+        SearchOptions{std::numeric_limits<float>::quiet_NaN(), 1}}) {
+    CHECK(!invalid.IsValid());
+    CheckThrows<std::invalid_argument>([&] {
+      restored.set_ai_options(Player::kBlack, invalid);
+    });
+    CHECK(restored.ai_options(Player::kBlack).num_playouts == 7);
+    CHECK(restored.ai_options(Player::kBlack).c_puct == 1.2345678f);
+  }
+
+  for (const char* value :
+       {"0", "-2", "nan", "inf", "1e9999", "oops", "2junk"}) {
+    {
+      std::ofstream file("gomoku.cfg");
+      file << "black_ai_num_playouts = " << value << "\n"
+           << "white_ai_c_puct = " << value << "\n"
+           << "black_ai_c_puct = 2.5\nwhite_ai_num_playouts = 17\n";
+    }
+    Configuration invalid;
+    CHECK(invalid.ai_options(Player::kBlack).num_playouts == 400);
+    CHECK(invalid.ai_options(Player::kBlack).c_puct == 2.5f);
+    CHECK(invalid.ai_options(Player::kWhite).num_playouts == 17);
+    CHECK(invalid.ai_options(Player::kWhite).c_puct == 5.0f);
+  }
+}
+
 void FileValidation() {
   // CTest runs this executable in the build directory, keeping test files local.
   const auto path = std::filesystem::current_path() / "test-record.gom";
@@ -441,6 +580,66 @@ void TreeLifecycleAndAI() {
   CheckThrows<std::invalid_argument>([] { AIPlayer no_model(nullptr); });
 }
 
+// Verifies that two AI players share an evaluator while keeping separate trees.
+void IndependentAIPlayers() {
+  auto evaluator = std::make_shared<FakeEvaluator>();
+  std::vector<int> evaluated_stones;
+  evaluator->evaluate = [&](const GamePosition& position) {
+    evaluated_stones.push_back(position.board().stone_count());
+    return evaluator->output;
+  };
+  AIPlayer black(evaluator, {0.5f, 1});
+  AIPlayer white(evaluator, {9.0f, 3});
+  GamePosition empty;
+  CHECK(black.PickMove(empty).has_value());
+  CHECK(evaluator->calls == 1);
+  CHECK(white.PickMove(empty).has_value());
+  CHECK(evaluator->calls == 4);  // Separate simulation budgets.
+  black.Reset();
+  evaluated_stones.clear();
+  CHECK(white.PickMove(empty).has_value());
+  CHECK(evaluated_stones.front() > 0);  // Resetting Black did not reset White.
+
+  Configuration config;
+  config.set_time_limit_enabled(true);
+  config.set_time_limit_seconds(0);  // Neither AI may lose to this time limit.
+  Game game(config, Game::Mode::kAIvsAI);
+  for (int round = 0; round < 2; ++round) {
+    game.Start();
+    black.Reset();
+    white.Reset();
+    while (game.state() == Game::State::kPlaying) {
+      auto& player = game.current_player() == Player::kBlack ? black : white;
+      auto result = std::async(std::launch::async, [&] {
+        return player.PickMove(game.position());
+      });
+      const auto action = result.get();
+      CHECK(action.has_value());
+      CHECK(game.TryPlaceStone(ActionRow(*action), ActionCol(*action)));
+      black.ObserveMove(*action);
+      white.ObserveMove(*action);
+      CHECK(game.record().size() <= kActionCount);
+    }
+    CHECK(game.position().is_terminal());
+    CHECK(!black.PickMove(game.position()));
+    CHECK(!white.PickMove(game.position()));
+    const auto record = game.FinalizeRecord();
+    CHECK(!record.metadata().time_limit_enabled);
+    CHECK(GamePosition::Rebuild(record.moves(), record.size())->result() ==
+          game.position().result());
+    const auto path = std::filesystem::current_path() / "test-self-play.gom";
+    struct Cleanup {
+      std::filesystem::path path;
+      ~Cleanup() { std::error_code ec; std::filesystem::remove(path, ec); }
+    } cleanup{path};
+    CHECK(FileManager::Save(record, path.string()));
+    ReplayController replay;
+    CHECK(replay.Load(path.string()));
+    CHECK(replay.total_moves() == record.size());
+    CHECK(replay.BoardAtStep(record.size()).stone_count() == record.size());
+  }
+}
+
 void FullGameWithUndo() {
   Configuration config;
   config.set_time_limit_enabled(false);
@@ -477,10 +676,13 @@ int main() {
       {"position rules", PositionRules},
       {"training feature contract", FeatureContract},
       {"game, undo, replay and timeout", GameUndoAndReplay},
+      {"game modes and human-only timers", GameModesAndTimers},
+      {"per-color AI configuration", AIConfiguration},
       {"save/load validation", FileValidation},
       {"search priors and options", SearchPriorsAndOptions},
       {"search value perspective", SearchValuePerspective},
       {"tree lifecycle and AI", TreeLifecycleAndAI},
+      {"independent AI self-play and replay", IndependentAIPlayers},
       {"full game with undo", FullGameWithUndo},
   };
   int failures = 0;

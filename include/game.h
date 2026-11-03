@@ -12,13 +12,19 @@
 class Game {
  public:
   enum class State { kPlaying, kWin, kDraw, kTimeout, kForfeit };
+  enum class Mode { kPlayerVsPlayer, kPlayerVsAI, kAIvsAI };
 
-  explicit Game(const Configuration& config);
+  explicit Game(const Configuration& config,
+                Mode mode = Mode::kPlayerVsPlayer);
+
+  // Returns true if `player` is controlled by an AI in the current mode.
+  bool IsAIPlayer(Player player) const;
+  Mode mode() const { return mode_; }
 
   // Resets the board, record, and timers for a new game.
   void Start();
 
-  // Checks the turn timer and transitions to kTimeout if time expired.
+  // Checks human turn timers and transitions to kTimeout if time expired.
   void Update();
 
   // Plays a move at (row, col) if legal and the game is ongoing.
@@ -33,7 +39,7 @@ class Game {
   // Seals and returns the game record. Requires the game to have ended.
   GameRecord FinalizeRecord();
 
-  // Returns remaining turn time in seconds, or -1.0f if the timer is disabled.
+  // Returns remaining turn time, or -1.0f when disabled or on an AI turn.
   float GetSecondsRemaining() const;
 
   State state() const { return state_; }
@@ -48,6 +54,7 @@ class Game {
   using Clock = std::chrono::steady_clock;
 
   Configuration config_;
+  Mode mode_;
   GamePosition position_;
   GameRecord record_;
 

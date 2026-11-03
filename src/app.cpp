@@ -92,6 +92,47 @@ void App::WaitForAI() {
   }
 }
 
+void App::StartGame(Game::Mode mode) {
+  WaitForAI();
+  try {
+    auto game = std::make_unique<Game>(config_, mode);
+    std::array<std::unique_ptr<AIPlayer>, 2> players;
+    if (mode != Game::Mode::kPlayerVsPlayer) {
+      // Share a single evaluator instance across active AI players.
+      auto evaluator =
+          std::make_shared<PolicyValueNetwork>("model/alpha-zero.pt");
+      for (Player color : {Player::kBlack, Player::kWhite}) {
+        if (game->IsAIPlayer(color)) {
+          players[static_cast<size_t>(color)] = std::make_unique<AIPlayer>(
+              evaluator, config_.ai_options(color));
+        }
+      }
+    }
+    // Reset timers after model initialization completes.
+    game->Start();
+    game_ = std::move(game);
+    ai_players_ = std::move(players);
+    ai_error_msg_.clear();
+    return_to_menu_requested_ = false;
+    finished_record_.reset();
+    save_attempted_ = false;
+    save_status_msg_.clear();
+    state_ = AppState::kPlaying;
+  } catch (const std::exception& e) {
+    ai_error_msg_ = e.what();
+    ReturnToMenu();
+  }
+}
+
+void App::ReturnToMenu() {
+  WaitForAI();
+  ai_players_ = {};
+  game_.reset();
+  finished_record_.reset();
+  return_to_menu_requested_ = false;
+  state_ = AppState::kMainMenu;
+}
+
 // ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
@@ -164,7 +205,7 @@ void App::RenderFrame() {
 
 void App::DrawMainMenu() {
   const float panel_w = 340.0f;
-  const float panel_h = ai_error_msg_.empty() ? 330.0f : 440.0f;
+  const float panel_h = ai_error_msg_.empty() ? 400.0f : 510.0f;
   ImGuiIO& io = ImGui::GetIO();
   ImGui::SetNextWindowPos({(io.DisplaySize.x - panel_w) * 0.5f,
                            (io.DisplaySize.y - panel_h) * 0.5f},
@@ -190,37 +231,16 @@ void App::DrawMainMenu() {
     return ImGui::Button(label, {btn_w, 36.0f});
   };
 
-  if (centred_btn("Local Two Player")) {
-    WaitForAI();
-    ai_error_msg_.clear();
-    is_ai_game_ = false;
-    ai_player_.reset();
-    game_ = std::make_unique<Game>(config_);
-    game_->Start();
-    finished_record_.reset();
-    save_attempted_ = false;
-    save_status_msg_.clear();
-    state_ = AppState::kPlaying;
+  if (centred_btn("Player vs Player")) {
+    StartGame(Game::Mode::kPlayerVsPlayer);
   }
   ImGui::Spacing();
   if (centred_btn("Player vs AI")) {
-    WaitForAI();
-    try {
-      auto player = std::make_unique<AIPlayer>(
-          std::make_unique<PolicyValueNetwork>("model/alpha-zero.pt"));
-      ai_player_ = std::move(player);
-      ai_error_msg_.clear();
-      is_ai_game_ = true;
-      ai_color_ = Player::kWhite;
-      game_ = std::make_unique<Game>(config_);
-      game_->Start();
-      finished_record_.reset();
-      save_attempted_ = false;
-      save_status_msg_.clear();
-      state_ = AppState::kPlaying;
-    } catch (const std::exception& e) {
-      ai_error_msg_ = e.what();
-    }
+    StartGame(Game::Mode::kPlayerVsAI);
+  }
+  ImGui::Spacing();
+  if (centred_btn("AI vs AI")) {
+    StartGame(Game::Mode::kAIvsAI);
   }
   ImGui::Spacing();
   if (centred_btn("Replay")) {
@@ -233,6 +253,10 @@ void App::DrawMainMenu() {
     settings_undo_enabled_ = config_.undo_enabled();
     settings_time_enabled_ = config_.time_limit_enabled();
     settings_time_seconds_ = config_.time_limit_seconds();
+    for (Player color : {Player::kBlack, Player::kWhite}) {
+      settings_ai_options_[static_cast<size_t>(color)] =
+          config_.ai_options(color);
+    }
     state_ = AppState::kSettings;
   }
   ImGui::Spacing();
@@ -253,127 +277,124 @@ void App::DrawMainMenu() {
 // ---------------------------------------------------------------------------
 
 void App::DrawGame() {
-  // Update timer every frame — may auto-transition to kTimeout.
+  const bool spectating = game_->mode() == Game::Mode::kAIvsAI;
+  if (spectating) {
+    ImGui::BeginDisabled(return_to_menu_requested_);
+    if (ImGui::Button("Back to Menu", {140, 32})) {
+      return_to_menu_requested_ = true;
+    }
+    ImGui::EndDisabled();
+  }
+
+  // Wait non-blockingly for the active search before leaving AI vs AI.
+  if (return_to_menu_requested_) {
+    if (!ai_result_.valid() ||
+        ai_result_.wait_for(std::chrono::seconds(0)) ==
+            std::future_status::ready) {
+      ReturnToMenu();
+      return;
+    }
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Returning to menu after the current AI search...");
+  }
+
   game_->Update();
   if (game_->state() != Game::State::kPlaying) {
-    WaitForAI();
     finished_record_ = game_->FinalizeRecord();
     state_ = AppState::kGameOver;
     return;
   }
 
-  const bool ai_turn = is_ai_game_ && game_->current_player() == ai_color_;
-
-  // ── Info bar ──────────────────────────────────────────────────────────
+  const bool ai_turn = game_->IsAIPlayer(game_->current_player());
   const char* player_name =
       (game_->current_player() == Player::kBlack) ? "Black" : "White";
   ImGui::SetWindowFontScale(1.15f);
   ImGui::Text("Move %d  |  %s to play", game_->next_move_number(), player_name);
   ImGui::SetWindowFontScale(1.0f);
 
-  if (config_.time_limit_enabled()) {
-    float secs = game_->GetSecondsRemaining();
+  const float secs = game_->GetSecondsRemaining();
+  if (secs >= 0.0f) {
     ImGui::SameLine();
-    if (secs <= 10.0f)
+    if (secs <= 10.0f) {
       ImGui::TextColored({1.0f, 0.25f, 0.25f, 1.0f}, "  |  Time: %.1fs", secs);
-    else
+    } else {
       ImGui::Text("  |  Time: %.1fs", secs);
+    }
   }
-
-  if (ai_turn) {
+  if (ai_turn && !return_to_menu_requested_) {
     ImGui::SameLine();
     ImGui::TextColored({0.4f, 0.8f, 1.0f, 1.0f}, "  |  AI is thinking...");
   }
-
   ImGui::Spacing();
 
-  // Keep one background search. The future transfers both moves and errors;
-  // tree updates happen on the main thread only after the search has finished.
-  if (ai_turn) {
+  // Run at most one background search; sync all AI trees on completion.
+  if (ai_turn && !return_to_menu_requested_) {
     try {
       if (!ai_result_.valid()) {
+        AIPlayer* player =
+            ai_players_[static_cast<size_t>(game_->current_player())].get();
         ai_result_ = std::async(
-            std::launch::async,
-            [player = ai_player_.get(), position = game_->position()] {
+            std::launch::async, [player, position = game_->position()] {
               return player->PickMove(position);
             });
       }
       if (ai_result_.wait_for(std::chrono::seconds(0)) ==
           std::future_status::ready) {
         const auto move = ai_result_.get();
-        if (!move || !IsValidAction(*move))
+        if (!move || !IsValidAction(*move)) {
           throw std::runtime_error("AI returned no legal move");
-        const int row = ActionRow(*move);
-        const int col = ActionCol(*move);
-        if (game_->TryPlaceStone(row, col)) {
-          ai_player_->ObserveMove(*move);
-        } else if (game_->state() == Game::State::kPlaying) {
+        }
+        if (!game_->TryPlaceStone(ActionRow(*move), ActionCol(*move))) {
           throw std::runtime_error("AI returned an illegal move");
         }
-        if (game_->state() != Game::State::kPlaying) {
-          finished_record_ = game_->FinalizeRecord();
-          state_ = AppState::kGameOver;
-          return;
+        for (auto& player : ai_players_) {
+          if (player) player->ObserveMove(*move);
         }
       }
     } catch (const std::exception& e) {
-      WaitForAI();
       ai_error_msg_ = e.what();
-      ai_player_.reset();
-      game_.reset();
-      is_ai_game_ = false;
-      state_ = AppState::kMainMenu;
+      ReturnToMenu();
       return;
     }
-    // While AI is thinking (or just placed its stone this frame):
-    // draw board read-only, skip human input and buttons.
-    const auto last = game_->position().last_move();
-    const int last_row = last ? ActionRow(*last) : -1;
-    const int last_col = last ? ActionCol(*last) : -1;
-    float avail_x = ImGui::GetContentRegionAvail().x;
-    float offset_x = (avail_x - Grid::kCanvasSize) * 0.5f;
-    if (offset_x > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset_x);
-    Grid::DrawBoardReadOnly(game_->board(), last_row, last_col);
-    return;
   }
 
-  // ── Board (human turn) ─────────────────────────────────────────────────
-  // Derive indicator coordinates directly from GamePosition (single source of truth).
   const auto last = game_->position().last_move();
   const int last_row = last ? ActionRow(*last) : -1;
   const int last_col = last ? ActionCol(*last) : -1;
-  float avail_x = ImGui::GetContentRegionAvail().x;
-  float offset_x = (avail_x - Grid::kCanvasSize) * 0.5f;
+  const float offset_x =
+      (ImGui::GetContentRegionAvail().x - Grid::kCanvasSize) * 0.5f;
   if (offset_x > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset_x);
 
-  auto [clicked_row, clicked_col] =
-      Grid::DrawBoard(game_->board(), last_row, last_col);
-
-  if (clicked_row >= 0) {
-    if (game_->TryPlaceStone(clicked_row, clicked_col)) {
-      if (is_ai_game_)
-        ai_player_->ObserveMove(ToAction(clicked_row, clicked_col));
-      if (game_->state() != Game::State::kPlaying) {
-        finished_record_ = game_->FinalizeRecord();
-        state_ = AppState::kGameOver;
-        return;
+  // Keep the board read-only for the entire frame of an AI turn.
+  if (ai_turn) {
+    Grid::DrawBoardReadOnly(game_->board(), last_row, last_col);
+  } else {
+    auto [row, col] = Grid::DrawBoard(game_->board(), last_row, last_col);
+    if (row >= 0 && game_->TryPlaceStone(row, col)) {
+      for (auto& player : ai_players_) {
+        if (player) player->ObserveMove(ToAction(row, col));
       }
     }
   }
 
-  ImGui::Spacing();
+  if (game_->state() != Game::State::kPlaying) {
+    finished_record_ = game_->FinalizeRecord();
+    state_ = AppState::kGameOver;
+    return;
+  }
 
-  // ── Buttons (hidden during AI turn) ───────────────────────────────────
-  if (!ai_turn) {
+  ImGui::Spacing();
+  if (!ai_turn && !game_->IsAIPlayer(game_->current_player())) {
     if (config_.undo_enabled()) {
       if (ImGui::Button("Undo", {100, 32})) {
         game_->Undo();
-        if (is_ai_game_) ai_player_->Reset();
+        for (auto& player : ai_players_) {
+          if (player) player->Reset();
+        }
       }
       ImGui::SameLine();
     }
     if (ImGui::Button("Forfeit", {100, 32})) {
-      WaitForAI();
       game_->Forfeit();
       finished_record_ = game_->FinalizeRecord();
       state_ = AppState::kGameOver;
@@ -468,7 +489,9 @@ void App::DrawGameOver() {
 
   if (ImGui::Button("New Game", {130, 34})) {
     WaitForAI();
-    if (is_ai_game_) ai_player_->Reset();
+    for (auto& player : ai_players_) {
+      if (player) player->Reset();
+    }
     game_->Start();
     finished_record_.reset();
     save_attempted_ = false;
@@ -477,12 +500,7 @@ void App::DrawGameOver() {
   }
   ImGui::SameLine();
   if (ImGui::Button("Main Menu", {130, 34})) {
-    WaitForAI();
-    is_ai_game_ = false;
-    ai_player_.reset();
-    game_.reset();
-    finished_record_.reset();
-    state_ = AppState::kMainMenu;
+    ReturnToMenu();
   }
 }
 
@@ -584,6 +602,7 @@ void App::DrawSettings() {
   ImGui::Checkbox("Enable undo", &settings_undo_enabled_);
   ImGui::Spacing();
   ImGui::Checkbox("Enable per-move time limit", &settings_time_enabled_);
+  ImGui::TextDisabled("Applies to human players only.");
   if (settings_time_enabled_) {
     ImGui::SetNextItemWidth(120.0f);
     ImGui::InputInt("Time limit (seconds)", &settings_time_seconds_);
@@ -592,15 +611,43 @@ void App::DrawSettings() {
 
   ImGui::Spacing();
   ImGui::Separator();
+  ImGui::TextUnformatted("AI search settings");
+  ImGui::TextDisabled("Player vs AI uses White AI settings.");
+  bool valid_ai_options = true;
+  for (Player color : {Player::kBlack, Player::kWhite}) {
+    ImGui::PushID(static_cast<int>(color));
+    ImGui::TextUnformatted(color == Player::kBlack ? "Black AI" : "White AI");
+    auto& options = settings_ai_options_[static_cast<size_t>(color)];
+    ImGui::SetNextItemWidth(160.0f);
+    ImGui::InputInt("num_playouts", &options.num_playouts);
+    ImGui::SetNextItemWidth(160.0f);
+    ImGui::InputFloat("c_puct", &options.c_puct, 0.1f, 1.0f, "%.6g");
+    valid_ai_options = valid_ai_options && options.IsValid();
+    ImGui::PopID();
+    ImGui::Spacing();
+  }
+  if (!valid_ai_options) {
+    ImGui::TextColored({1.0f, 0.25f, 0.25f, 1.0f},
+                       "AI settings must be positive; c_puct must be finite.");
+  }
+
+  ImGui::Spacing();
+  ImGui::Separator();
   ImGui::Spacing();
 
+  ImGui::BeginDisabled(!valid_ai_options);
   if (ImGui::Button("Save & Back", {130, 34})) {
     config_.set_undo_enabled(settings_undo_enabled_);
     config_.set_time_limit_enabled(settings_time_enabled_);
     config_.set_time_limit_seconds(settings_time_seconds_);
+    for (Player color : {Player::kBlack, Player::kWhite}) {
+      config_.set_ai_options(color,
+                             settings_ai_options_[static_cast<size_t>(color)]);
+    }
     config_.Save();
     state_ = AppState::kMainMenu;
   }
+  ImGui::EndDisabled();
   ImGui::SameLine();
   if (ImGui::Button("Cancel", {100, 34})) {
     state_ = AppState::kMainMenu;

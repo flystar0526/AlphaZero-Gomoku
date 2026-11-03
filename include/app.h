@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <future>
 #include <memory>
 #include <optional>
@@ -38,6 +39,10 @@ class App {
   void Shutdown();
   // Finish and discard an obsolete background result before changing AI state.
   void WaitForAI();
+  // Initializes game state and AI players for the selected mode.
+  void StartGame(Game::Mode mode);
+  // Resets active game/AI state and returns to the main menu.
+  void ReturnToMenu();
 
   // Per-frame orchestration.
   void RenderFrame();
@@ -73,12 +78,13 @@ class App {
   // Settings: temporary copy edited in the Settings panel.
   bool settings_undo_enabled_ = false;
   bool settings_time_enabled_ = false;
-  int  settings_time_seconds_ = 60;
+  int settings_time_seconds_ = 60;
+  std::array<SearchOptions, 2> settings_ai_options_{};
 
   // ── AI game fields ──────────────────────────────────────────────────────────
-  bool is_ai_game_ = false;
-  Player ai_color_ = Player::kWhite;
-  std::unique_ptr<AIPlayer> ai_player_;
+  std::array<std::unique_ptr<AIPlayer>, 2> ai_players_;
   std::future<std::optional<Action>> ai_result_;
   std::string ai_error_msg_;
+  // Defers returning to menu in AI vs AI until the active search finishes.
+  bool return_to_menu_requested_ = false;
 };

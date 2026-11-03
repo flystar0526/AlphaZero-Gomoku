@@ -9,7 +9,7 @@
 // Not thread-safe; all calls must be serialized by the caller.
 class AIPlayer {
  public:
-  explicit AIPlayer(std::unique_ptr<PolicyValueEvaluator> evaluator,
+  explicit AIPlayer(std::shared_ptr<PolicyValueEvaluator> evaluator,
                     SearchOptions options = {});
   AIPlayer(const AIPlayer&) = delete;
   AIPlayer& operator=(const AIPlayer&) = delete;
@@ -25,6 +25,7 @@ class AIPlayer {
   void Reset();
 
  private:
-  std::unique_ptr<PolicyValueEvaluator> evaluator_;
+  // May be shared between players; evaluation calls must still be serialized.
+  std::shared_ptr<PolicyValueEvaluator> evaluator_;
   MCTS mcts_;
 };

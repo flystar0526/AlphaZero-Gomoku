@@ -7,8 +7,14 @@
 #include <iomanip>
 #include <sstream>
 
-Game::Game(const Configuration& config) : config_(config) {
+Game::Game(const Configuration& config, Mode mode)
+    : config_(config), mode_(mode) {
   Start();
+}
+
+bool Game::IsAIPlayer(Player player) const {
+  return mode_ == Mode::kAIvsAI ||
+         (mode_ == Mode::kPlayerVsAI && player == Player::kWhite);
 }
 
 void Game::Start() {
@@ -24,14 +30,17 @@ void Game::Start() {
 
 void Game::Update() {
   if (state_ != State::kPlaying) return;
-  if (config_.time_limit_enabled() && GetSecondsRemaining() <= 0.0f) {
+  if (config_.time_limit_enabled() && !IsAIPlayer(current_player()) &&
+      GetSecondsRemaining() <= 0.0f) {
     winner_ = Opponent(current_player());
     state_ = State::kTimeout;
   }
 }
 
 float Game::GetSecondsRemaining() const {
-  if (!config_.time_limit_enabled()) return -1.0f;
+  if (!config_.time_limit_enabled() || IsAIPlayer(current_player())) {
+    return -1.0f;
+  }
   const float elapsed =
       std::chrono::duration<float>(Clock::now() - turn_start_time_).count();
   const float remaining =
@@ -65,7 +74,8 @@ bool Game::TryPlaceStone(int row, int col) {
 }
 
 void Game::Undo() {
-  if (state_ != State::kPlaying || !config_.undo_enabled() ||
+  if (state_ != State::kPlaying || mode_ == Mode::kAIvsAI ||
+      !config_.undo_enabled() ||
       record_.size() < 2) {
     return;
   }
@@ -107,8 +117,9 @@ GameRecord Game::FinalizeRecord() {
   metadata.duration_sec = duration_seconds;
   metadata.total_moves = record_.size();
   metadata.winner = winner_;
-  metadata.undo_enabled = config_.undo_enabled();
-  metadata.time_limit_enabled = config_.time_limit_enabled();
+  metadata.undo_enabled = config_.undo_enabled() && mode_ != Mode::kAIvsAI;
+  metadata.time_limit_enabled =
+      config_.time_limit_enabled() && mode_ != Mode::kAIvsAI;
   metadata.time_limit_seconds = config_.time_limit_seconds();
 
   record_.Finalize(metadata);

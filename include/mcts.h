@@ -10,6 +10,9 @@
 struct SearchOptions {
   float c_puct = 5.0f;
   int num_playouts = 400;
+
+  // Checks whether c_puct is finite and both parameters are positive.
+  bool IsValid() const;
 };
 
 // Search statistics for a candidate move at the root position.

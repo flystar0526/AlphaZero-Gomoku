@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-AIPlayer::AIPlayer(std::unique_ptr<PolicyValueEvaluator> evaluator,
+AIPlayer::AIPlayer(std::shared_ptr<PolicyValueEvaluator> evaluator,
                    SearchOptions options)
     : evaluator_(std::move(evaluator)), mcts_(options) {
   if (!evaluator_) {

@@ -57,9 +57,12 @@ struct MCTS::TreeNode {
   }
 };
 
+bool SearchOptions::IsValid() const {
+  return std::isfinite(c_puct) && c_puct > 0.0f && num_playouts > 0;
+}
+
 MCTS::MCTS(SearchOptions options) : options_(options) {
-  if (!std::isfinite(options_.c_puct) || options_.c_puct <= 0.0f ||
-      options_.num_playouts <= 0) {
+  if (!options_.IsValid()) {
     throw std::invalid_argument(
         "Search requires positive c_puct and num_playouts");
   }
