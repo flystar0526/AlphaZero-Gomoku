@@ -13,9 +13,9 @@ class AlphaZero {
   static constexpr int kWidth    = 15;
   static constexpr int kChannels = 9;
 
-  // Loads the TorchScript model; moves to CUDA if available and use_gpu=true.
-  // Throws std::runtime_error on load failure.
-  explicit AlphaZero(const std::string& model_path, bool use_gpu = true);
+  // Loads the TorchScript model on CUDA.
+  // Throws std::runtime_error if CUDA is unavailable or loading fails.
+  explicit AlphaZero(const std::string& model_path);
 
   // Input: flat vector of size kChannels * kHeight * kWidth = 2025 floats.
   // Output: { action_probs (kHeight*kWidth), value_scalar }

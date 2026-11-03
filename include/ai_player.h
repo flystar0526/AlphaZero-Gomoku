@@ -10,8 +10,8 @@
 // PickMove() is called from a background thread; all other methods from main.
 class AIPlayer {
  public:
-  explicit AIPlayer(const std::string& model_path, bool use_gpu = true,
-                    float c_puct = 5.0f, int n_playout = 400);
+  explicit AIPlayer(const std::string& model_path, float c_puct = 5.0f,
+                    int n_playout = 400);
 
   // Runs MCTS and returns the best action (flat index row*15+col).
   // Also advances the internal tree root to the chosen move.

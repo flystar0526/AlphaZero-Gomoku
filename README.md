@@ -6,17 +6,21 @@ A Gomoku (Five in a Row) game written in C++17 with a Dear ImGui GUI. Supports l
 - Real-time per-move countdown timer
 - Black and white stone rendering on a wood-coloured board
 - Game save / load (`.gom` format) and step-through replay
-- AI opponent backed by a AlphaZero model running on CUDA or CPU
+- AI opponent backed by an AlphaZero model running on CUDA
 
 ## Requirements
 
 | Dependency | Notes |
 |---|---|
-| CMake ≥ 3.16 | Build system |
-| C++17 compiler | GCC 9+, Clang 10+, or MSVC 2019+ |
-| CUDA 12.6 | Required for GPU inference |
-| OpenGL | Usually pre-installed on Linux/macOS/Windows |
-| libGL / X11 / Wayland dev headers | Linux only (see below) |
+| Linux x86_64 | Supported platform |
+| CMake ≥ 3.28 | Build system |
+| C++17 compiler | GCC 9+ or Clang 10+ |
+| CUDA Toolkit 13.0 | Required to build against LibTorch |
+| NVIDIA GPU and compatible driver | Required for AI inference with CUDA 13.0 |
+| LibTorch 2.11.0 + CUDA 13.0 | Downloaded automatically by CMake |
+| OpenGL / libGL / X11 / Wayland dev headers | See below |
+
+CPU-only builds and Windows are not supported.
 
 ### Linux — install system packages
 
@@ -37,19 +41,20 @@ sudo pacman -S cmake base-devel pkg-config mesa libx11 libxrandr libxinerama \
 
 ```bash
 # 1. Clone with submodules (imgui + glfw live under third_party/)
-git clone --recurse-submodules git@github.com:JTtNinjaCode/gomoku.git
-cd gomoku
+git clone --recurse-submodules https://github.com/flystar0526/AlphaZero-Gomoku.git
+cd AlphaZero-Gomoku
 
-# 2. Configure
-cmake -B build            # GPU build (CUDA, default)
-cmake -B build -DUSE_GPU=OFF   # CPU-only build
+# 2. Configure (choose one)
+# Default configuration
+cmake -B build
+# Release configuration (enables compiler optimizations)
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 
 # 3. Compile
-cmake --build build -j$(nproc)            # Linux / macOS
-cmake --build build --config Release      # Windows
+cmake --build build -j$(nproc)
 ```
 
-The binary is placed at `build/gomoku` (or `build\Release\gomoku.exe` on Windows).
+The binary is placed at `build/gomoku`
 
 > **Already cloned without `--recurse-submodules`?**
 > ```bash
@@ -73,7 +78,7 @@ Use the main menu to choose a mode. Everything is mouse-driven:
 
 ### AI Model
 
-**Player vs AI** requires a TorchScript model file at `model/alpha-zero.pt` (relative to the working directory). The AI automatically uses CUDA if a compatible GPU is available, and falls back to CPU otherwise.
+**Player vs AI** requires a TorchScript model file at `model/alpha-zero.pt` (relative to the working directory), a CUDA-capable NVIDIA GPU, and a driver compatible with CUDA 13.0. The model always runs on CUDA; initialization fails if CUDA is unavailable.
 
 ### Timer
 

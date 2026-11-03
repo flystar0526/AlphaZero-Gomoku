@@ -12,12 +12,8 @@
 #include "imgui.h"
 #include "mcts_state.h"
 
-#define GL_SILENCE_DEPRECATION
 #include <GLFW/glfw3.h>
 
-#if defined(_WIN32)
-#include <windows.h>
-#endif
 #include <cstdio>
 
 // ---------------------------------------------------------------------------
@@ -44,18 +40,10 @@ bool App::Init() {
   glfwSetErrorCallback(GlfwErrorCallback);
   if (!glfwInit()) return false;
 
-  // GL 3.0 + GLSL 130 (Linux/Windows).
-#if defined(__APPLE__)
-  const char* glsl_version = "#version 150";
-  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
-  glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-  glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-#else
+  // GL 3.0 + GLSL 130 (Linux).
   const char* glsl_version = "#version 130";
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-#endif
 
   window_ = glfwCreateWindow(760, 800, "Gomoku", nullptr, nullptr);
   if (!window_) {

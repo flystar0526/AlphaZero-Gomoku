@@ -1,8 +1,7 @@
 #include "ai_player.h"
 
-AIPlayer::AIPlayer(const std::string& model_path, bool use_gpu, float c_puct,
-                   int n_playout)
-    : net_(model_path, use_gpu), mcts_(c_puct, n_playout) {}
+AIPlayer::AIPlayer(const std::string& model_path, float c_puct, int n_playout)
+    : net_(model_path), mcts_(c_puct, n_playout) {}
 
 int AIPlayer::PickMove(const MCTSState& state) {
   auto move_visits = mcts_.GetMoveVisits(state, net_);

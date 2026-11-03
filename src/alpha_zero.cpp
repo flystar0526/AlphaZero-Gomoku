@@ -2,10 +2,10 @@
 
 #include <stdexcept>
 
-AlphaZero::AlphaZero(const std::string& model_path, bool use_gpu)
-    : device_(torch::kCPU) {
-  if (use_gpu && torch::cuda::is_available())
-    device_ = torch::Device(torch::kCUDA);
+AlphaZero::AlphaZero(const std::string& model_path) : device_(torch::kCUDA) {
+  if (!torch::cuda::is_available())
+    throw std::runtime_error(
+        "AlphaZero requires a CUDA-capable NVIDIA GPU and a compatible driver");
 
   try {
     module_ = torch::jit::load(model_path, device_);
