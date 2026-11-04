@@ -58,13 +58,15 @@ struct MCTS::TreeNode {
 };
 
 bool SearchOptions::IsValid() const {
-  return std::isfinite(c_puct) && c_puct > 0.0f && num_playouts > 0;
+  return std::isfinite(c_puct) && c_puct > 0.0f && num_playouts > 0 &&
+         std::isfinite(temperature) && temperature >= 0.0f &&
+         num_sampling_moves >= 0 && num_sampling_moves <= kActionCount;
 }
 
 MCTS::MCTS(SearchOptions options) : options_(options) {
   if (!options_.IsValid()) {
     throw std::invalid_argument(
-        "Search requires positive c_puct and num_playouts");
+        "Search requires valid search and move sampling options");
   }
   Reset();
 }

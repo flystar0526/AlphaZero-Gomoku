@@ -6,12 +6,15 @@
 #include "game_position.h"
 #include "policy_value_network.h"
 
-// Hyperparameters controlling MCTS exploration and simulation budget.
+// Hyperparameters controlling MCTS search and move sampling.
 struct SearchOptions {
   float c_puct = 5.0f;
   int num_playouts = 400;
+  float temperature = 1.0f;
+  // Total moves by both players; zero disables move sampling.
+  int num_sampling_moves = 30;
 
-  // Checks whether c_puct is finite and both parameters are positive.
+  // Checks search limits and finite, nonnegative sampling parameters.
   bool IsValid() const;
 };
 
@@ -41,6 +44,8 @@ class MCTS {
 
   // Discards the current search tree and initializes a fresh root node.
   void Reset();
+
+  const SearchOptions& options() const { return options_; }
 
  private:
   struct TreeNode;

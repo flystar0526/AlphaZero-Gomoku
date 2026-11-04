@@ -1,11 +1,43 @@
 #include "configuration.h"
 
+#include <cerrno>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <limits>
-#include <sstream>
 #include <stdexcept>
 #include <string>
+
+namespace {
+
+void ParseIntOption(const std::string& text, SearchOptions& options, int& field,
+                    int default_value) {
+  field = default_value;
+  try {
+    size_t parsed = 0;
+    const int value = std::stoi(text, &parsed);
+    if (parsed == text.size()) {
+      field = value;
+      if (!options.IsValid()) field = default_value;
+    }
+  } catch (const std::exception&) {
+  }
+}
+
+void ParseFloatOption(const std::string& text, SearchOptions& options,
+                      float& field, float default_value) {
+  field = default_value;
+  char* end = nullptr;
+  errno = 0;
+  const float value = std::strtof(text.c_str(), &end);
+  if (end != text.c_str() && end == text.c_str() + text.size() &&
+      (errno != ERANGE || value != 0.0f)) {
+    field = value;
+    if (!options.IsValid()) field = default_value;
+  }
+}
+
+}  // namespace
 
 Configuration::Configuration() {
   std::ifstream file(kConfigPath);
@@ -39,28 +71,22 @@ Configuration::Configuration() {
       }
     } else {
       // Parse per-color AI search options; invalid values fall back to defaults.
+      const SearchOptions defaults;
       for (Player player : {Player::kBlack, Player::kWhite}) {
         const std::string prefix =
             player == Player::kBlack ? "black_ai_" : "white_ai_";
         auto& options = ai_options_[static_cast<size_t>(player)];
-        try {
-          size_t parsed = 0;
-          if (key == prefix + "num_playouts") {
-            options.num_playouts = SearchOptions{}.num_playouts;
-            const int value = std::stoi(val, &parsed);
-            if (parsed == val.size() && value > 0) {
-              options.num_playouts = value;
-            }
-          } else if (key == prefix + "c_puct") {
-            options.c_puct = SearchOptions{}.c_puct;
-            const float value = std::stof(val, &parsed);
-            SearchOptions candidate = options;
-            candidate.c_puct = value;
-            if (parsed == val.size() && candidate.IsValid()) {
-              options.c_puct = value;
-            }
-          }
-        } catch (const std::exception&) {
+        if (key == prefix + "num_playouts") {
+          ParseIntOption(val, options, options.num_playouts,
+                         defaults.num_playouts);
+        } else if (key == prefix + "c_puct") {
+          ParseFloatOption(val, options, options.c_puct, defaults.c_puct);
+        } else if (key == prefix + "temperature") {
+          ParseFloatOption(val, options, options.temperature,
+                           defaults.temperature);
+        } else if (key == prefix + "num_sampling_moves") {
+          ParseIntOption(val, options, options.num_sampling_moves,
+                         defaults.num_sampling_moves);
         }
       }
     }
@@ -81,6 +107,9 @@ void Configuration::Save() const {
     const auto& options = ai_options(player);
     file << prefix << "num_playouts = " << options.num_playouts << "\n";
     file << prefix << "c_puct = " << options.c_puct << "\n";
+    file << prefix << "temperature = " << options.temperature << "\n";
+    file << prefix << "num_sampling_moves = " << options.num_sampling_moves
+         << "\n";
   }
 }
 
@@ -100,7 +129,7 @@ void Configuration::set_time_limit_seconds(int seconds) {
 void Configuration::set_ai_options(Player player, SearchOptions options) {
   if (!options.IsValid()) {
     throw std::invalid_argument(
-        "AI settings require positive c_puct and num_playouts");
+        "AI settings require valid search and move sampling options");
   }
   ai_options_[static_cast<size_t>(player)] = options;
 }

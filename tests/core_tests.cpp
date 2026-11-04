@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -314,30 +315,38 @@ void GameModesAndTimers() {
   CHECK(self_play.record().size() == 0);
 }
 
+struct ScopedTempDir {
+  std::filesystem::path original;
+  std::filesystem::path directory;
+
+  explicit ScopedTempDir(const std::string& prefix)
+      : original(std::filesystem::current_path()),
+        directory(original /
+                  (prefix + "-" +
+                   std::to_string(std::chrono::steady_clock::now()
+                                      .time_since_epoch()
+                                      .count()))) {
+    std::filesystem::create_directories(directory);
+    std::filesystem::current_path(directory);
+  }
+
+  ~ScopedTempDir() {
+    std::filesystem::current_path(original);
+    std::error_code ec;
+    std::filesystem::remove_all(directory, ec);
+  }
+};
+
 // Verifies loading, saving, and validation of per-color AI search options.
 void AIConfiguration() {
-  // Isolate gomoku.cfg so tests cannot overwrite the user's settings.
-  const auto original = std::filesystem::current_path();
-  const auto directory =
-      original / ("test-ai-config-" +
-                  std::to_string(std::chrono::steady_clock::now()
-                                     .time_since_epoch()
-                                     .count()));
-  std::filesystem::create_directory(directory);
-  struct Cleanup {
-    std::filesystem::path original, directory;
-    ~Cleanup() {
-      std::filesystem::current_path(original);
-      std::error_code ec;
-      std::filesystem::remove_all(directory, ec);
-    }
-  } cleanup{original, directory};
-  std::filesystem::current_path(directory);
+  ScopedTempDir temp_dir("test-ai-config");
 
   Configuration defaults;
   for (Player color : {Player::kBlack, Player::kWhite}) {
     CHECK(defaults.ai_options(color).num_playouts == 400);
     CHECK(Near(defaults.ai_options(color).c_puct, 5.0f));
+    CHECK(defaults.ai_options(color).temperature == 1.0f);
+    CHECK(defaults.ai_options(color).num_sampling_moves == 30);
   }
   {
     std::ofstream("gomoku.cfg")
@@ -348,30 +357,46 @@ void AIConfiguration() {
   CHECK(legacy.time_limit_seconds() == 30);
   CHECK(legacy.ai_options(Player::kBlack).num_playouts == 400);
   CHECK(Near(legacy.ai_options(Player::kWhite).c_puct, 5.0f));
+  for (Player color : {Player::kBlack, Player::kWhite}) {
+    CHECK(legacy.ai_options(color).temperature == 1.0f);
+    CHECK(legacy.ai_options(color).num_sampling_moves == 30);
+  }
 
-  legacy.set_ai_options(Player::kBlack, {1.2345678f, 7});
-  legacy.set_ai_options(Player::kWhite, {8.7654321f, 19});
+  legacy.set_ai_options(Player::kBlack, {1.2345678f, 7, 0.12345678f, 7});
+  legacy.set_ai_options(Player::kWhite, {8.7654321f, 19, 2.5f, kActionCount});
   legacy.Save();
   Configuration restored;
   for (Player color : {Player::kBlack, Player::kWhite}) {
     CHECK(restored.ai_options(color).num_playouts ==
           legacy.ai_options(color).num_playouts);
     CHECK(restored.ai_options(color).c_puct == legacy.ai_options(color).c_puct);
+    CHECK(restored.ai_options(color).temperature ==
+          legacy.ai_options(color).temperature);
+    CHECK(restored.ai_options(color).num_sampling_moves ==
+          legacy.ai_options(color).num_sampling_moves);
   }
   CHECK(restored.undo_enabled());
   CHECK(restored.time_limit_seconds() == 30);
 
   for (SearchOptions invalid :
-       {SearchOptions{0.0f, 1}, SearchOptions{-1.0f, 1},
-        SearchOptions{5.0f, 0}, SearchOptions{5.0f, -1},
+       {SearchOptions{0.0f, 1}, SearchOptions{-1.0f, 1}, SearchOptions{5.0f, 0},
+        SearchOptions{5.0f, -1},
         SearchOptions{std::numeric_limits<float>::infinity(), 1},
-        SearchOptions{std::numeric_limits<float>::quiet_NaN(), 1}}) {
+        SearchOptions{std::numeric_limits<float>::quiet_NaN(), 1},
+        SearchOptions{5.0f, 1, -1.0f, 30},
+        SearchOptions{5.0f, 1, std::numeric_limits<float>::infinity(), 30},
+        SearchOptions{5.0f, 1, std::numeric_limits<float>::quiet_NaN(), 30},
+        SearchOptions{5.0f, 1, 1.0f, -1},
+        SearchOptions{5.0f, 1, 1.0f, kActionCount + 1}}) {
     CHECK(!invalid.IsValid());
     CheckThrows<std::invalid_argument>([&] {
       restored.set_ai_options(Player::kBlack, invalid);
     });
+    CheckThrows<std::invalid_argument>([&] { MCTS search(invalid); });
     CHECK(restored.ai_options(Player::kBlack).num_playouts == 7);
     CHECK(restored.ai_options(Player::kBlack).c_puct == 1.2345678f);
+    CHECK(restored.ai_options(Player::kBlack).temperature == 0.12345678f);
+    CHECK(restored.ai_options(Player::kBlack).num_sampling_moves == 7);
   }
 
   for (const char* value :
@@ -387,6 +412,51 @@ void AIConfiguration() {
     CHECK(invalid.ai_options(Player::kBlack).c_puct == 2.5f);
     CHECK(invalid.ai_options(Player::kWhite).num_playouts == 17);
     CHECK(invalid.ai_options(Player::kWhite).c_puct == 5.0f);
+  }
+}
+
+// Verifies parsing and boundary validation of move sampling configuration.
+void MoveSamplingConfiguration() {
+  ScopedTempDir temp_dir("test-sampling-config");
+
+  for (const char* value :
+       {"-2", "nan", "inf", "-inf", "1e9999", "1e-100", "oops", "2junk"}) {
+    {
+      std::ofstream file("gomoku.cfg");
+      file << "black_ai_temperature = 0.5\n"
+           << "black_ai_temperature = " << value << "\n"
+           << "white_ai_num_sampling_moves = 12\n"
+           << "white_ai_num_sampling_moves = " << value << "\n"
+           << "white_ai_temperature = 2\nblack_ai_num_sampling_moves = 9\n";
+    }
+    Configuration config;
+    CHECK(config.ai_options(Player::kBlack).temperature == 1.0f);
+    CHECK(config.ai_options(Player::kBlack).num_sampling_moves == 9);
+    CHECK(config.ai_options(Player::kWhite).temperature == 2.0f);
+    CHECK(config.ai_options(Player::kWhite).num_sampling_moves == 30);
+  }
+  {
+    std::ofstream file("gomoku.cfg");
+    file << "black_ai_temperature = 0\nblack_ai_num_sampling_moves = 0\n"
+         << "white_ai_temperature = 226\nwhite_ai_num_sampling_moves = 226\n";
+  }
+  Configuration config;
+  CHECK(config.ai_options(Player::kBlack).IsValid());
+  CHECK(config.ai_options(Player::kBlack).temperature == 0.0f);
+  CHECK(config.ai_options(Player::kBlack).num_sampling_moves == 0);
+  CHECK(config.ai_options(Player::kWhite).temperature == 226.0f);
+  CHECK(config.ai_options(Player::kWhite).num_sampling_moves == 30);
+  config.Save();
+  Configuration restored;
+  CHECK(restored.ai_options(Player::kBlack).temperature == 0.0f);
+  CHECK(restored.ai_options(Player::kBlack).num_sampling_moves == 0);
+  for (float temperature :
+       {std::numeric_limits<float>::denorm_min(),
+        std::numeric_limits<float>::min(), std::numeric_limits<float>::max()}) {
+    restored.set_ai_options(Player::kBlack, {5.0f, 11, temperature, 30});
+    restored.Save();
+    Configuration reloaded;
+    CHECK(reloaded.ai_options(Player::kBlack).temperature == temperature);
   }
 }
 
@@ -580,6 +650,142 @@ void TreeLifecycleAndAI() {
   CheckThrows<std::invalid_argument>([] { AIPlayer no_model(nullptr); });
 }
 
+// These priors yield root visits [6, 3, 1] after 11 simulations at value zero.
+std::shared_ptr<FakeEvaluator> SamplingEvaluator(const GamePosition& position) {
+  const auto actions = position.LegalActions();
+  CHECK(actions.size() >= 3);
+  auto evaluator = std::make_shared<FakeEvaluator>();
+  evaluator->output.policy.fill(0.0f);
+  evaluator->output.policy[actions[0]] = 0.6f;
+  evaluator->output.policy[actions[1]] = 0.3f;
+  evaluator->output.policy[actions[2]] = 0.1f;
+  return evaluator;
+}
+
+// Verifies that move sampling matches the temperature-weighted visit distribution.
+void MoveSamplingDistribution() {
+  GamePosition position;
+  const auto draw_moves = DrawMoves();
+  for (int i = 0; i < kActionCount - 3; ++i) position.PlayMove(draw_moves[i]);
+  const auto actions = position.LegalActions();
+  auto evaluator = SamplingEvaluator(position);
+  const std::array<int, 3> visits = {6, 3, 1};
+  MCTS reference({5.0f, 11});
+  const auto candidates = reference.Search(position, *evaluator);
+  CHECK(candidates.size() == visits.size());
+  for (size_t i = 0; i < visits.size(); ++i) {
+    CHECK(candidates[i].action == actions[i]);
+    CHECK(candidates[i].visits == visits[i]);
+  }
+
+  constexpr int kSamples = 10000;
+  for (float temperature : {0.5f, 1.0f, 2.0f}) {
+    const SearchOptions options{5.0f, 11, temperature, kActionCount};
+    AIPlayer player(evaluator, options, 12345);
+    AIPlayer identical(evaluator, options, 12345);
+    std::array<int, 3> counts{};
+    for (int i = 0; i < kSamples; ++i) {
+      player.Reset();
+      identical.Reset();
+      const auto action = player.PickMove(position);
+      CHECK(action.has_value());
+      CHECK(action == identical.PickMove(position));
+      const auto found = std::find(actions.begin(), actions.end(), *action);
+      CHECK(found != actions.end());
+      ++counts[static_cast<size_t>(found - actions.begin())];
+    }
+    double total_weight = 0.0;
+    for (int count : visits) {
+      total_weight += std::pow(count, 1.0 / temperature);
+    }
+    for (size_t i = 0; i < visits.size(); ++i) {
+      const double expected =
+          std::pow(visits[i], 1.0 / temperature) / total_weight;
+      const double actual = static_cast<double>(counts[i]) / kSamples;
+      CHECK(std::abs(actual - expected) < 0.03);
+    }
+  }
+}
+
+// Verifies sampling move count limits, undo restoration, and disabling options.
+void MoveSamplingBoundaries() {
+  auto evaluator = SamplingEvaluator(GamePosition());
+  AIPlayer player(evaluator, {5.0f, 11, 1.0f, 4}, 12345);
+  const auto count_alternatives = [&](const GamePosition& position,
+                                      AIPlayer& ai) {
+    evaluator->output = SamplingEvaluator(position)->output;
+    const Action greedy = position.LegalActions().front();
+    int alternatives = 0;
+    for (int i = 0; i < 64; ++i) {
+      ai.Reset();
+      const auto action = ai.PickMove(position);
+      CHECK(action.has_value());
+      CHECK(position.IsLegalMove(*action));
+      if (*action != greedy) ++alternatives;
+    }
+    return alternatives;
+  };
+
+  Configuration config;
+  config.set_undo_enabled(true);
+  config.set_time_limit_enabled(false);
+  Game game(config, Game::Mode::kPlayerVsAI);
+  CHECK(count_alternatives(game.position(), player) > 0);
+  for (int col = 14; col > 11; --col) CHECK(game.TryPlaceStone(14, col));
+  CHECK(game.board().stone_count() == 3);
+  CHECK(count_alternatives(game.position(), player) > 0);
+  CHECK(game.TryPlaceStone(14, 11));
+  CHECK(game.board().stone_count() == 4);
+  CHECK(count_alternatives(game.position(), player) == 0);
+
+  game.Undo();
+  CHECK(game.board().stone_count() == 2);
+  CHECK(count_alternatives(game.position(), player) > 0);
+  game.Start();
+  CHECK(count_alternatives(game.position(), player) > 0);
+
+  AIPlayer zero_temperature(evaluator, {5.0f, 11, 0.0f, 30}, 12345);
+  CHECK(count_alternatives(game.position(), zero_temperature) == 0);
+  AIPlayer zero_moves(evaluator, {5.0f, 11, 1.0f, 0}, 12345);
+  CHECK(count_alternatives(game.position(), zero_moves) == 0);
+}
+
+// Verifies fallback and extreme temperature behavior during move sampling.
+void MoveSamplingEdgeCases() {
+  GamePosition position;
+  auto evaluator = SamplingEvaluator(position);
+  AIPlayer unvisited(evaluator, {5.0f, 1}, 12345);
+  CHECK(unvisited.PickMove(position) == 0);
+  evaluator->output.policy[0] = 0.3f;
+  CHECK(unvisited.PickMove(position) == 0);
+  unvisited.Reset();
+  CHECK(unvisited.PickMove(position) == 0);
+
+  evaluator = SamplingEvaluator(position);
+  AIPlayer one_visited(evaluator,
+                       {5.0f, 2, std::numeric_limits<float>::max(), 30}, 12345);
+  AIPlayer cold(evaluator,
+                {5.0f, 11, std::numeric_limits<float>::denorm_min(), 30},
+                12345);
+  for (int i = 0; i < 64; ++i) {
+    one_visited.Reset();
+    CHECK(one_visited.PickMove(position) == 0);
+    cold.Reset();
+    CHECK(cold.PickMove(position) == 0);
+  }
+
+  const auto moves = DrawMoves();
+  for (int i = 0; i < kActionCount - 1; ++i) position.PlayMove(moves[i]);
+  AIPlayer last_move(evaluator, {5.0f, 2, 1.0f, kActionCount}, 12345);
+  CHECK(last_move.PickMove(position) == moves.back());
+  CHECK(position.board().stone_count() == kActionCount - 1);
+  position.PlayMove(moves.back());
+  last_move.ObserveMove(moves.back());
+  const int calls = evaluator->calls;
+  CHECK(!last_move.PickMove(position));
+  CHECK(evaluator->calls == calls);
+}
+
 // Verifies that two AI players share an evaluator while keeping separate trees.
 void IndependentAIPlayers() {
   auto evaluator = std::make_shared<FakeEvaluator>();
@@ -678,10 +884,14 @@ int main() {
       {"game, undo, replay and timeout", GameUndoAndReplay},
       {"game modes and human-only timers", GameModesAndTimers},
       {"per-color AI configuration", AIConfiguration},
+      {"move sampling configuration", MoveSamplingConfiguration},
       {"save/load validation", FileValidation},
       {"search priors and options", SearchPriorsAndOptions},
       {"search value perspective", SearchValuePerspective},
       {"tree lifecycle and AI", TreeLifecycleAndAI},
+      {"move sampling distribution", MoveSamplingDistribution},
+      {"move sampling boundaries and undo", MoveSamplingBoundaries},
+      {"move sampling edge cases", MoveSamplingEdgeCases},
       {"independent AI self-play and replay", IndependentAIPlayers},
       {"full game with undo", FullGameWithUndo},
   };

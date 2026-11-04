@@ -613,6 +613,7 @@ void App::DrawSettings() {
   ImGui::Separator();
   ImGui::TextUnformatted("AI search settings");
   ImGui::TextDisabled("Player vs AI uses White AI settings.");
+  ImGui::TextDisabled("Set temperature or num_sampling_moves to 0 to disable sampling.");
   bool valid_ai_options = true;
   for (Player color : {Player::kBlack, Player::kWhite}) {
     ImGui::PushID(static_cast<int>(color));
@@ -622,13 +623,19 @@ void App::DrawSettings() {
     ImGui::InputInt("num_playouts", &options.num_playouts);
     ImGui::SetNextItemWidth(160.0f);
     ImGui::InputFloat("c_puct", &options.c_puct, 0.1f, 1.0f, "%.6g");
+    ImGui::SetNextItemWidth(160.0f);
+    ImGui::InputFloat("temperature", &options.temperature, 0.1f, 1.0f, "%.6g");
+    ImGui::SetNextItemWidth(160.0f);
+    ImGui::InputInt("num_sampling_moves", &options.num_sampling_moves);
     valid_ai_options = valid_ai_options && options.IsValid();
     ImGui::PopID();
     ImGui::Spacing();
   }
   if (!valid_ai_options) {
     ImGui::TextColored({1.0f, 0.25f, 0.25f, 1.0f},
-                       "AI settings must be positive; c_puct must be finite.");
+                       "Requires num_playouts > 0, c_puct > 0, temperature >= 0, "
+                       "and num_sampling_moves in 0..%d.",
+                       kActionCount);
   }
 
   ImGui::Spacing();

@@ -75,7 +75,7 @@ Use the main menu to choose a mode. Everything is mouse-driven:
 - **Player vs AI** — single-player mode where you play Black and the AI responds as White.
 - **AI vs AI** — watch two AI players play against each other automatically.
 - **Replay** — enter a path to a `.gom` file, then use **Prev / Next** (or ← → arrow keys) to step through moves.
-- **Settings** — configure undo, the per-move time limit, and per-color AI search parameters (`num_playouts` and `c_puct`). Changes are saved to `gomoku.cfg`.
+- **Settings** — configure undo, the per-move time limit, and per-color AI parameters (`num_playouts`, `c_puct`, `temperature`, and `num_sampling_moves`). Changes are saved to `gomoku.cfg` and apply when the next game starts.
 
 ### AI Model
 
@@ -92,6 +92,14 @@ The bundled model is the three-channel `best_checkpoint.pt` export from the trai
 Coordinates are used directly, with action index `row * 15 + col`; there is no flip or transpose. The model returns a tuple of log-policy `[1, 225]` and value `[1, 1]`, with value measured from the side to move. Older nine-channel models are incompatible. Loading and inference errors are shown in the main menu.
 
 Search currently evaluates one position at a time. The GUI keeps one background AI job; batched inference and parallel MCTS are not implemented.
+
+### Move Sampling
+
+Each AI samples moves with weights proportional to `visits^(1 / temperature)` after MCTS finishes for the first `num_sampling_moves` moves of a game. The defaults are `temperature = 1` and `num_sampling_moves = 30`. The move limit counts both players together: the first 30 board moves use sampling on AI turns, and move 31 onward selects the most visited move. Lower positive temperatures favor the most visited moves more strongly; higher temperatures spread the probabilities more evenly among visited moves.
+
+Set either parameter to `0` to select the most visited move throughout the game. Temperature must be finite and nonnegative, and the move limit must be between `0` and `225`. If a search has not visited any child yet, selection falls back to the existing prior-based tie breaking. Undo uses the restored board's move count to determine whether sampling applies again.
+
+Black and White have independent settings; Player vs AI uses White's settings. The corresponding configuration keys are `black_ai_temperature`, `black_ai_num_sampling_moves`, `white_ai_temperature`, and `white_ai_num_sampling_moves`. Older configuration files without these keys use the new defaults. Each AI has an independently seeded random engine, so different games can produce different move sequences, though distinct game records are not guaranteed.
 
 ### Core Design
 
