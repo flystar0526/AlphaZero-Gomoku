@@ -19,6 +19,8 @@ class Game {
 
   // Returns true if `player` is controlled by an AI in the current mode.
   bool IsAIPlayer(Player player) const;
+  // Returns the AI player assigned to `player`, if any.
+  std::optional<AIPlayerId> GetAIPlayerId(Player player) const;
   Mode mode() const { return mode_; }
 
   // Resets the board, record, and timers for a new game.

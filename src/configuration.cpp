@@ -7,8 +7,13 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace {
+
+constexpr std::string_view ConfigPrefix(AIPlayerId player) {
+  return player == AIPlayerId::kPlayer1 ? "ai_player_1_" : "ai_player_2_";
+}
 
 void ParseIntOption(const std::string& text, SearchOptions& options, int& field,
                     int default_value) {
@@ -70,21 +75,23 @@ Configuration::Configuration() {
       } catch (...) {
       }
     } else {
-      // Parse per-color AI search options; invalid values fall back to defaults.
+      // Invalid AI search options fall back to defaults.
       const SearchOptions defaults;
-      for (Player player : {Player::kBlack, Player::kWhite}) {
-        const std::string prefix =
-            player == Player::kBlack ? "black_ai_" : "white_ai_";
+      for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
+        const std::string_view prefix = ConfigPrefix(player);
+        if (std::string_view(key).substr(0, prefix.size()) != prefix) continue;
+        const std::string_view option_name =
+            std::string_view(key).substr(prefix.size());
         auto& options = ai_options_[static_cast<size_t>(player)];
-        if (key == prefix + "num_playouts") {
+        if (option_name == "num_playouts") {
           ParseIntOption(val, options, options.num_playouts,
                          defaults.num_playouts);
-        } else if (key == prefix + "c_puct") {
+        } else if (option_name == "c_puct") {
           ParseFloatOption(val, options, options.c_puct, defaults.c_puct);
-        } else if (key == prefix + "temperature") {
+        } else if (option_name == "temperature") {
           ParseFloatOption(val, options, options.temperature,
                            defaults.temperature);
-        } else if (key == prefix + "num_sampling_moves") {
+        } else if (option_name == "num_sampling_moves") {
           ParseIntOption(val, options, options.num_sampling_moves,
                          defaults.num_sampling_moves);
         }
@@ -102,8 +109,8 @@ void Configuration::Save() const {
        << "\n";
   file << "time_limit_seconds = " << time_limit_seconds_ << "\n";
   file << std::setprecision(std::numeric_limits<float>::max_digits10);
-  for (Player player : {Player::kBlack, Player::kWhite}) {
-    const char* prefix = player == Player::kBlack ? "black_ai_" : "white_ai_";
+  for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
+    const std::string_view prefix = ConfigPrefix(player);
     const auto& options = ai_options(player);
     file << prefix << "num_playouts = " << options.num_playouts << "\n";
     file << prefix << "c_puct = " << options.c_puct << "\n";
@@ -116,7 +123,7 @@ void Configuration::Save() const {
 bool Configuration::undo_enabled() const { return undo_enabled_; }
 bool Configuration::time_limit_enabled() const { return time_limit_enabled_; }
 int Configuration::time_limit_seconds() const { return time_limit_seconds_; }
-const SearchOptions& Configuration::ai_options(Player player) const {
+const SearchOptions& Configuration::ai_options(AIPlayerId player) const {
   return ai_options_[static_cast<size_t>(player)];
 }
 void Configuration::set_undo_enabled(bool value) { undo_enabled_ = value; }
@@ -126,7 +133,7 @@ void Configuration::set_time_limit_enabled(bool value) {
 void Configuration::set_time_limit_seconds(int seconds) {
   time_limit_seconds_ = seconds;
 }
-void Configuration::set_ai_options(Player player, SearchOptions options) {
+void Configuration::set_ai_options(AIPlayerId player, SearchOptions options) {
   if (!options.IsValid()) {
     throw std::invalid_argument(
         "AI settings require valid search and move sampling options");

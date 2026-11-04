@@ -5,6 +5,9 @@
 
 #include "mcts.h"
 
+// Identifies an AI's settings independently of its stone color.
+enum class AIPlayerId { kPlayer1, kPlayer2 };
+
 // Holds all user-configurable game settings.
 // Loaded from and persisted to gomoku.cfg on disk.
 class Configuration {
@@ -21,13 +24,13 @@ class Configuration {
   bool undo_enabled() const;
   bool time_limit_enabled() const;
   int time_limit_seconds() const;
-  const SearchOptions& ai_options(Player player) const;
+  const SearchOptions& ai_options(AIPlayerId player) const;
 
   void set_undo_enabled(bool value);
   void set_time_limit_enabled(bool value);
   void set_time_limit_seconds(int seconds);
   // Sets MCTS options for `player`; throws std::invalid_argument if invalid.
-  void set_ai_options(Player player, SearchOptions options);
+  void set_ai_options(AIPlayerId player, SearchOptions options);
 
  private:
   static constexpr const char* kConfigPath = "gomoku.cfg";

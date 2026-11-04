@@ -74,8 +74,8 @@ Use the main menu to choose a mode. Everything is mouse-driven:
 - **Player vs Player** — click an intersection on the board to place your stone. Black moves first.
 - **Player vs AI** — single-player mode where you play Black and the AI responds as White.
 - **AI vs AI** — watch two AI players play against each other automatically.
-- **Replay** — enter a path to a `.gom` file, then use **Prev / Next** (or ← → arrow keys) to step through moves.
-- **Settings** — configure undo, the per-move time limit, and per-color AI parameters (`num_playouts`, `c_puct`, `temperature`, and `num_sampling_moves`). Changes are saved to `gomoku.cfg` and apply when the next game starts.
+- **Replay** — click a `.gom` file in the saved-game list or enter a path, then use **Prev / Next** (or ← → arrow keys) to step through moves. The list shows files directly in `saves/`, relative to the working directory, sorted by filename. It refreshes when Replay opens or when you click **Refresh**, and collapses after a successful load. A failed load preserves the current replay.
+- **Settings** — configure undo, the per-move time limit, and independent **AI Player 1** / **AI Player 2** parameters (`num_playouts`, `c_puct`, `temperature`, and `num_sampling_moves`). Changes are saved to `gomoku.cfg` and apply when the next game starts.
 
 ### AI Model
 
@@ -99,7 +99,11 @@ Each AI samples moves with weights proportional to `visits^(1 / temperature)` af
 
 Set either parameter to `0` to select the most visited move throughout the game. Temperature must be finite and nonnegative, and the move limit must be between `0` and `225`. If a search has not visited any child yet, selection falls back to the existing prior-based tie breaking. Undo uses the restored board's move count to determine whether sampling applies again.
 
-Black and White have independent settings; Player vs AI uses White's settings. The corresponding configuration keys are `black_ai_temperature`, `black_ai_num_sampling_moves`, `white_ai_temperature`, and `white_ai_num_sampling_moves`. Older configuration files without these keys use the new defaults. Each AI has an independently seeded random engine, so different games can produce different move sequences, though distinct game records are not guaranteed.
+AI Player 1 and AI Player 2 have independent settings identified separately from stone colors. **Player vs AI** uses AI Player 1, which plays White. **AI vs AI** currently assigns AI Player 1 to Black and AI Player 2 to White; a color-swap control is not yet provided.
+
+Configuration keys use the prefixes `ai_player_1_` and `ai_player_2_`, followed by `num_playouts`, `c_puct`, `temperature`, or `num_sampling_moves` (for example, `ai_player_1_temperature`). Missing keys use the defaults: 400 playouts, `c_puct = 5`, `temperature = 1`, and `num_sampling_moves = 30`. Old `black_ai_*` and `white_ai_*` keys are ignored; saving settings writes only the new keys.
+
+Each AI has an independently seeded random engine, so different games can produce different move sequences, though distinct game records are not guaranteed.
 
 ### Core Design
 

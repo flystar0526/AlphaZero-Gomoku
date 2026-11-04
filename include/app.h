@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "ai_player.h"
 #include "configuration.h"
@@ -54,7 +55,17 @@ class App {
   void DrawReplay();
   void DrawSettings();
 
+  // Refreshes the list of saved games.
+  void RefreshReplayFiles();
+  // Loads a game record for replay.
+  void LoadReplay(const std::string& path);
+
   // ── State ────────────────────────────────────────────────────────────────
+  struct ReplayFile {
+    std::string path;
+    std::string filename;
+  };
+
   GLFWwindow* window_ = nullptr;
   AppState state_ = AppState::kMainMenu;
   Configuration config_;
@@ -74,6 +85,9 @@ class App {
   int replay_cursor_ = 0;
   char replay_path_buf_[512] = {};
   std::string replay_error_msg_;
+  std::vector<ReplayFile> replay_files_;
+  std::string replay_files_error_msg_;
+  bool replay_files_open_ = true;
 
   // Settings: temporary copy edited in the Settings panel.
   bool settings_undo_enabled_ = false;

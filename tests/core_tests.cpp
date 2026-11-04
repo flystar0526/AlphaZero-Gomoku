@@ -7,6 +7,7 @@
 #include <functional>
 #include <future>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -264,6 +265,8 @@ void GameModesAndTimers() {
   CHECK(human.mode() == Game::Mode::kPlayerVsPlayer);
   CHECK(!human.IsAIPlayer(Player::kBlack));
   CHECK(!human.IsAIPlayer(Player::kWhite));
+  CHECK(!human.GetAIPlayerId(Player::kBlack));
+  CHECK(!human.GetAIPlayerId(Player::kWhite));
   CHECK(human.GetSecondsRemaining() > 0.0f);
   CHECK(human.TryPlaceStone(7, 7));
   CHECK(human.GetSecondsRemaining() > 0.0f);
@@ -271,6 +274,8 @@ void GameModesAndTimers() {
   Game mixed(config, Game::Mode::kPlayerVsAI);
   CHECK(!mixed.IsAIPlayer(Player::kBlack));
   CHECK(mixed.IsAIPlayer(Player::kWhite));
+  CHECK(!mixed.GetAIPlayerId(Player::kBlack));
+  CHECK(mixed.GetAIPlayerId(Player::kWhite) == AIPlayerId::kPlayer1);
   CHECK(mixed.GetSecondsRemaining() > 0.0f);
   CHECK(mixed.TryPlaceStone(7, 7));
   CHECK(mixed.GetSecondsRemaining() == -1.0f);
@@ -293,6 +298,8 @@ void GameModesAndTimers() {
   Game self_play(config, Game::Mode::kAIvsAI);
   CHECK(self_play.IsAIPlayer(Player::kBlack));
   CHECK(self_play.IsAIPlayer(Player::kWhite));
+  CHECK(self_play.GetAIPlayerId(Player::kBlack) == AIPlayerId::kPlayer1);
+  CHECK(self_play.GetAIPlayerId(Player::kWhite) == AIPlayerId::kPlayer2);
   for (int col = 0; col < 4; ++col) {
     CHECK(self_play.GetSecondsRemaining() == -1.0f);
     self_play.Update();
@@ -311,6 +318,8 @@ void GameModesAndTimers() {
   CHECK(config.undo_enabled());
   self_play.Start();
   CHECK(self_play.mode() == Game::Mode::kAIvsAI);
+  CHECK(self_play.GetAIPlayerId(Player::kBlack) == AIPlayerId::kPlayer1);
+  CHECK(self_play.GetAIPlayerId(Player::kWhite) == AIPlayerId::kPlayer2);
   CHECK(self_play.GetSecondsRemaining() == -1.0f);
   CHECK(self_play.record().size() == 0);
 }
@@ -337,43 +346,55 @@ struct ScopedTempDir {
   }
 };
 
-// Verifies loading, saving, and validation of per-color AI search options.
+// Verifies loading, saving, and validation of per-player AI search options.
 void AIConfiguration() {
   ScopedTempDir temp_dir("test-ai-config");
 
   Configuration defaults;
-  for (Player color : {Player::kBlack, Player::kWhite}) {
-    CHECK(defaults.ai_options(color).num_playouts == 400);
-    CHECK(Near(defaults.ai_options(color).c_puct, 5.0f));
-    CHECK(defaults.ai_options(color).temperature == 1.0f);
-    CHECK(defaults.ai_options(color).num_sampling_moves == 30);
+  for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
+    CHECK(defaults.ai_options(player).num_playouts == 400);
+    CHECK(Near(defaults.ai_options(player).c_puct, 5.0f));
+    CHECK(defaults.ai_options(player).temperature == 1.0f);
+    CHECK(defaults.ai_options(player).num_sampling_moves == 30);
   }
   {
     std::ofstream("gomoku.cfg")
-        << "undo_enabled = true\ntime_limit_seconds = 30\n";
+        << "undo_enabled = true\ntime_limit_seconds = 30\n"
+        << "black_ai_num_playouts = 17\nwhite_ai_c_puct = 2.5\n";
   }
-  Configuration legacy;
-  CHECK(legacy.undo_enabled());
-  CHECK(legacy.time_limit_seconds() == 30);
-  CHECK(legacy.ai_options(Player::kBlack).num_playouts == 400);
-  CHECK(Near(legacy.ai_options(Player::kWhite).c_puct, 5.0f));
-  for (Player color : {Player::kBlack, Player::kWhite}) {
-    CHECK(legacy.ai_options(color).temperature == 1.0f);
-    CHECK(legacy.ai_options(color).num_sampling_moves == 30);
+  Configuration partial;
+  CHECK(partial.undo_enabled());
+  CHECK(partial.time_limit_seconds() == 30);
+  CHECK(partial.ai_options(AIPlayerId::kPlayer1).num_playouts == 400);
+  CHECK(Near(partial.ai_options(AIPlayerId::kPlayer2).c_puct, 5.0f));
+  for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
+    CHECK(partial.ai_options(player).temperature == 1.0f);
+    CHECK(partial.ai_options(player).num_sampling_moves == 30);
   }
 
-  legacy.set_ai_options(Player::kBlack, {1.2345678f, 7, 0.12345678f, 7});
-  legacy.set_ai_options(Player::kWhite, {8.7654321f, 19, 2.5f, kActionCount});
-  legacy.Save();
+  partial.set_ai_options(AIPlayerId::kPlayer1, {1.2345678f, 7, 0.12345678f, 7});
+  partial.set_ai_options(AIPlayerId::kPlayer2,
+                         {8.7654321f, 19, 2.5f, kActionCount});
+  partial.Save();
+  {
+    std::ifstream file("gomoku.cfg");
+    const std::string saved{std::istreambuf_iterator<char>(file),
+                            std::istreambuf_iterator<char>()};
+    CHECK(saved.find("ai_player_1_num_playouts = 7\n") != std::string::npos);
+    CHECK(saved.find("ai_player_2_num_playouts = 19\n") != std::string::npos);
+    CHECK(saved.find("black_ai_") == std::string::npos);
+    CHECK(saved.find("white_ai_") == std::string::npos);
+  }
   Configuration restored;
-  for (Player color : {Player::kBlack, Player::kWhite}) {
-    CHECK(restored.ai_options(color).num_playouts ==
-          legacy.ai_options(color).num_playouts);
-    CHECK(restored.ai_options(color).c_puct == legacy.ai_options(color).c_puct);
-    CHECK(restored.ai_options(color).temperature ==
-          legacy.ai_options(color).temperature);
-    CHECK(restored.ai_options(color).num_sampling_moves ==
-          legacy.ai_options(color).num_sampling_moves);
+  for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
+    CHECK(restored.ai_options(player).num_playouts ==
+          partial.ai_options(player).num_playouts);
+    CHECK(restored.ai_options(player).c_puct ==
+          partial.ai_options(player).c_puct);
+    CHECK(restored.ai_options(player).temperature ==
+          partial.ai_options(player).temperature);
+    CHECK(restored.ai_options(player).num_sampling_moves ==
+          partial.ai_options(player).num_sampling_moves);
   }
   CHECK(restored.undo_enabled());
   CHECK(restored.time_limit_seconds() == 30);
@@ -390,28 +411,28 @@ void AIConfiguration() {
         SearchOptions{5.0f, 1, 1.0f, kActionCount + 1}}) {
     CHECK(!invalid.IsValid());
     CheckThrows<std::invalid_argument>([&] {
-      restored.set_ai_options(Player::kBlack, invalid);
+      restored.set_ai_options(AIPlayerId::kPlayer1, invalid);
     });
     CheckThrows<std::invalid_argument>([&] { MCTS search(invalid); });
-    CHECK(restored.ai_options(Player::kBlack).num_playouts == 7);
-    CHECK(restored.ai_options(Player::kBlack).c_puct == 1.2345678f);
-    CHECK(restored.ai_options(Player::kBlack).temperature == 0.12345678f);
-    CHECK(restored.ai_options(Player::kBlack).num_sampling_moves == 7);
+    CHECK(restored.ai_options(AIPlayerId::kPlayer1).num_playouts == 7);
+    CHECK(restored.ai_options(AIPlayerId::kPlayer1).c_puct == 1.2345678f);
+    CHECK(restored.ai_options(AIPlayerId::kPlayer1).temperature == 0.12345678f);
+    CHECK(restored.ai_options(AIPlayerId::kPlayer1).num_sampling_moves == 7);
   }
 
   for (const char* value :
        {"0", "-2", "nan", "inf", "1e9999", "oops", "2junk"}) {
     {
       std::ofstream file("gomoku.cfg");
-      file << "black_ai_num_playouts = " << value << "\n"
-           << "white_ai_c_puct = " << value << "\n"
-           << "black_ai_c_puct = 2.5\nwhite_ai_num_playouts = 17\n";
+      file << "ai_player_1_num_playouts = " << value << "\n"
+           << "ai_player_2_c_puct = " << value << "\n"
+           << "ai_player_1_c_puct = 2.5\nai_player_2_num_playouts = 17\n";
     }
     Configuration invalid;
-    CHECK(invalid.ai_options(Player::kBlack).num_playouts == 400);
-    CHECK(invalid.ai_options(Player::kBlack).c_puct == 2.5f);
-    CHECK(invalid.ai_options(Player::kWhite).num_playouts == 17);
-    CHECK(invalid.ai_options(Player::kWhite).c_puct == 5.0f);
+    CHECK(invalid.ai_options(AIPlayerId::kPlayer1).num_playouts == 400);
+    CHECK(invalid.ai_options(AIPlayerId::kPlayer1).c_puct == 2.5f);
+    CHECK(invalid.ai_options(AIPlayerId::kPlayer2).num_playouts == 17);
+    CHECK(invalid.ai_options(AIPlayerId::kPlayer2).c_puct == 5.0f);
   }
 }
 
@@ -423,41 +444,84 @@ void MoveSamplingConfiguration() {
        {"-2", "nan", "inf", "-inf", "1e9999", "1e-100", "oops", "2junk"}) {
     {
       std::ofstream file("gomoku.cfg");
-      file << "black_ai_temperature = 0.5\n"
-           << "black_ai_temperature = " << value << "\n"
-           << "white_ai_num_sampling_moves = 12\n"
-           << "white_ai_num_sampling_moves = " << value << "\n"
-           << "white_ai_temperature = 2\nblack_ai_num_sampling_moves = 9\n";
+      file << "ai_player_1_temperature = 0.5\n"
+           << "ai_player_1_temperature = " << value << "\n"
+           << "ai_player_2_num_sampling_moves = 12\n"
+           << "ai_player_2_num_sampling_moves = " << value << "\n"
+           << "ai_player_2_temperature = 2\n"
+           << "ai_player_1_num_sampling_moves = 9\n";
     }
     Configuration config;
-    CHECK(config.ai_options(Player::kBlack).temperature == 1.0f);
-    CHECK(config.ai_options(Player::kBlack).num_sampling_moves == 9);
-    CHECK(config.ai_options(Player::kWhite).temperature == 2.0f);
-    CHECK(config.ai_options(Player::kWhite).num_sampling_moves == 30);
+    CHECK(config.ai_options(AIPlayerId::kPlayer1).temperature == 1.0f);
+    CHECK(config.ai_options(AIPlayerId::kPlayer1).num_sampling_moves == 9);
+    CHECK(config.ai_options(AIPlayerId::kPlayer2).temperature == 2.0f);
+    CHECK(config.ai_options(AIPlayerId::kPlayer2).num_sampling_moves == 30);
   }
   {
     std::ofstream file("gomoku.cfg");
-    file << "black_ai_temperature = 0\nblack_ai_num_sampling_moves = 0\n"
-         << "white_ai_temperature = 226\nwhite_ai_num_sampling_moves = 226\n";
+    file << "ai_player_1_temperature = 0\nai_player_1_num_sampling_moves = 0\n"
+         << "ai_player_2_temperature = 226\n"
+         << "ai_player_2_num_sampling_moves = 226\n";
   }
   Configuration config;
-  CHECK(config.ai_options(Player::kBlack).IsValid());
-  CHECK(config.ai_options(Player::kBlack).temperature == 0.0f);
-  CHECK(config.ai_options(Player::kBlack).num_sampling_moves == 0);
-  CHECK(config.ai_options(Player::kWhite).temperature == 226.0f);
-  CHECK(config.ai_options(Player::kWhite).num_sampling_moves == 30);
+  CHECK(config.ai_options(AIPlayerId::kPlayer1).IsValid());
+  CHECK(config.ai_options(AIPlayerId::kPlayer1).temperature == 0.0f);
+  CHECK(config.ai_options(AIPlayerId::kPlayer1).num_sampling_moves == 0);
+  CHECK(config.ai_options(AIPlayerId::kPlayer2).temperature == 226.0f);
+  CHECK(config.ai_options(AIPlayerId::kPlayer2).num_sampling_moves == 30);
   config.Save();
   Configuration restored;
-  CHECK(restored.ai_options(Player::kBlack).temperature == 0.0f);
-  CHECK(restored.ai_options(Player::kBlack).num_sampling_moves == 0);
+  CHECK(restored.ai_options(AIPlayerId::kPlayer1).temperature == 0.0f);
+  CHECK(restored.ai_options(AIPlayerId::kPlayer1).num_sampling_moves == 0);
   for (float temperature :
        {std::numeric_limits<float>::denorm_min(),
         std::numeric_limits<float>::min(), std::numeric_limits<float>::max()}) {
-    restored.set_ai_options(Player::kBlack, {5.0f, 11, temperature, 30});
+    restored.set_ai_options(AIPlayerId::kPlayer1, {5.0f, 11, temperature, 30});
     restored.Save();
     Configuration reloaded;
-    CHECK(reloaded.ai_options(Player::kBlack).temperature == temperature);
+    CHECK(reloaded.ai_options(AIPlayerId::kPlayer1).temperature == temperature);
   }
+}
+
+// Verifies saved-game file discovery.
+void SavedGameFiles() {
+  ScopedTempDir temp_dir("test-saved-games");
+  std::vector<std::string> paths{"stale.gom"};
+  CHECK(FileManager::ListGameFiles("saves", &paths));
+  CHECK(paths.empty());
+
+  std::filesystem::create_directory("saves");
+  CHECK(FileManager::ListGameFiles("saves", &paths));
+  CHECK(paths.empty());
+
+  GameRecord record;
+  record.AddMove({1, Player::kBlack, 7, 7});
+  GameMetadata metadata;
+  metadata.total_moves = 1;
+  record.Finalize(metadata);
+  CHECK(FileManager::Save(record, "saves/b.gom"));
+  CHECK(FileManager::Save(record, "saves/a game.gom"));
+  std::ofstream("saves/notes.txt");
+  std::ofstream("saves/upper.GOM");
+  std::filesystem::create_directory("saves/nested.gom");
+  CHECK(FileManager::Save(record, "saves/nested.gom/hidden.gom"));
+
+  CHECK(FileManager::ListGameFiles("saves", &paths));
+  CHECK(paths == std::vector<std::string>({"saves/a game.gom", "saves/b.gom"}));
+  ReplayController replay;
+  for (const auto& path : paths) {
+    CHECK(replay.Load(path));
+    CHECK(replay.total_moves() == 1);
+    CHECK(replay.BoardAtStep(1).GetCell(ToAction(7, 7)) == Cell::kBlack);
+  }
+
+  CHECK(FileManager::Save(record, "saves/c.gom"));
+  std::filesystem::remove("saves/b.gom");
+  CHECK(FileManager::ListGameFiles("saves", &paths));
+  CHECK(paths == std::vector<std::string>({"saves/a game.gom", "saves/c.gom"}));
+  CHECK(!FileManager::ListGameFiles("saves/notes.txt", &paths));
+  CHECK(paths.empty());
+  CHECK(!FileManager::ListGameFiles("saves", nullptr));
 }
 
 void FileValidation() {
@@ -883,8 +947,9 @@ int main() {
       {"training feature contract", FeatureContract},
       {"game, undo, replay and timeout", GameUndoAndReplay},
       {"game modes and human-only timers", GameModesAndTimers},
-      {"per-color AI configuration", AIConfiguration},
+      {"per-player AI configuration", AIConfiguration},
       {"move sampling configuration", MoveSamplingConfiguration},
+      {"saved-game discovery", SavedGameFiles},
       {"save/load validation", FileValidation},
       {"search priors and options", SearchPriorsAndOptions},
       {"search value perspective", SearchValuePerspective},

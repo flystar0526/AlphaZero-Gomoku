@@ -1,9 +1,12 @@
 #include "file_manager.h"
 
+#include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <utility>
 
 // ---------------------------------------------------------------------------
@@ -46,6 +49,30 @@ bool SplitKeyValue(const std::string& line, std::string& key,
 }
 
 }  // namespace
+
+bool FileManager::ListGameFiles(const std::string& directory,
+                                std::vector<std::string>* paths) {
+  if (!paths) return false;
+  paths->clear();
+
+  std::error_code error;
+  std::filesystem::directory_iterator entry(directory, error);
+  if (error) return error == std::errc::no_such_file_or_directory;
+
+  std::vector<std::string> files;
+  const std::filesystem::directory_iterator end;
+  while (!error && entry != end) {
+    if (entry->is_regular_file(error) && entry->path().extension() == ".gom") {
+      files.push_back(entry->path().generic_string());
+    }
+    if (!error) entry.increment(error);
+  }
+  if (error) return false;
+
+  std::sort(files.begin(), files.end());
+  *paths = std::move(files);
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // FileManager::Save

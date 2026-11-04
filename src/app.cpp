@@ -102,9 +102,10 @@ void App::StartGame(Game::Mode mode) {
       auto evaluator =
           std::make_shared<PolicyValueNetwork>("model/alpha-zero.pt");
       for (Player color : {Player::kBlack, Player::kWhite}) {
-        if (game->IsAIPlayer(color)) {
+        const auto player = game->GetAIPlayerId(color);
+        if (player.has_value()) {
           players[static_cast<size_t>(color)] = std::make_unique<AIPlayer>(
-              evaluator, config_.ai_options(color));
+              evaluator, config_.ai_options(*player));
         }
       }
     }
@@ -246,6 +247,8 @@ void App::DrawMainMenu() {
   if (centred_btn("Replay")) {
     replay_path_buf_[0] = '\0';
     replay_error_msg_.clear();
+    replay_files_open_ = true;
+    RefreshReplayFiles();
     state_ = AppState::kReplay;
   }
   ImGui::Spacing();
@@ -253,9 +256,9 @@ void App::DrawMainMenu() {
     settings_undo_enabled_ = config_.undo_enabled();
     settings_time_enabled_ = config_.time_limit_enabled();
     settings_time_seconds_ = config_.time_limit_seconds();
-    for (Player color : {Player::kBlack, Player::kWhite}) {
-      settings_ai_options_[static_cast<size_t>(color)] =
-          config_.ai_options(color);
+    for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
+      settings_ai_options_[static_cast<size_t>(player)] =
+          config_.ai_options(player);
     }
     state_ = AppState::kSettings;
   }
@@ -508,8 +511,57 @@ void App::DrawGameOver() {
 // Replay
 // ---------------------------------------------------------------------------
 
+void App::RefreshReplayFiles() {
+  replay_files_.clear();
+  replay_files_error_msg_.clear();
+  std::vector<std::string> paths;
+  if (!FileManager::ListGameFiles("saves", &paths)) {
+    replay_files_error_msg_ = "Failed to read saves/.";
+    return;
+  }
+  replay_files_.reserve(paths.size());
+  for (auto& path : paths) {
+    std::string filename = std::filesystem::path(path).filename().string();
+    replay_files_.push_back({std::move(path), std::move(filename)});
+  }
+}
+
+void App::LoadReplay(const std::string& path) {
+  if (!replay_.Load(path)) {
+    replay_error_msg_ = "Failed to load '" + path + "'.";
+    return;
+  }
+  replay_error_msg_.clear();
+  replay_cursor_ = 0;
+  replay_files_open_ = false;
+}
+
 void App::DrawReplay() {
-  ImGui::TextUnformatted("Replay — enter path to a .gom file:");
+  ImGui::TextUnformatted("Replay");
+  ImGui::SetNextItemOpen(replay_files_open_);
+  replay_files_open_ = ImGui::CollapsingHeader("Saved games (saves/)");
+  if (replay_files_open_) {
+    if (ImGui::Button("Refresh")) RefreshReplayFiles();
+    if (!replay_files_error_msg_.empty()) {
+      ImGui::TextColored({1.0f, 0.4f, 0.4f, 1.0f}, "%s",
+                         replay_files_error_msg_.c_str());
+    } else if (replay_files_.empty()) {
+      ImGui::TextDisabled("No .gom files in saves/.");
+    } else {
+      const float list_height = ImGui::GetTextLineHeightWithSpacing() * 4.0f +
+                                ImGui::GetStyle().FramePadding.y * 2.0f;
+      if (ImGui::BeginListBox("##saved_games", {0.0f, list_height})) {
+        for (const auto& file : replay_files_) {
+          ImGui::PushID(file.path.c_str());
+          if (ImGui::Selectable(file.filename.c_str())) LoadReplay(file.path);
+          ImGui::PopID();
+        }
+        ImGui::EndListBox();
+      }
+    }
+  }
+
+  ImGui::TextUnformatted("Or enter a path to a .gom file:");
   ImGui::SetNextItemWidth(500.0f);
   bool enter_pressed =
       ImGui::InputText("##path", replay_path_buf_, sizeof(replay_path_buf_),
@@ -518,19 +570,13 @@ void App::DrawReplay() {
   ImGui::SameLine();
   bool load_clicked = ImGui::Button("Load");
 
+  if (enter_pressed || load_clicked) {
+    LoadReplay(replay_path_buf_);
+  }
+
   if (!replay_error_msg_.empty()) {
     ImGui::TextColored({1.0f, 0.4f, 0.4f, 1.0f}, "%s",
                        replay_error_msg_.c_str());
-  }
-
-  if (enter_pressed || load_clicked) {
-    replay_error_msg_.clear();
-    if (replay_.Load(replay_path_buf_)) {
-      replay_cursor_ = 0;
-    } else {
-      replay_error_msg_ =
-          std::string("Failed to load '") + replay_path_buf_ + "'.";
-    }
   }
 
   if (replay_.total_moves() > 0) {
@@ -612,13 +658,16 @@ void App::DrawSettings() {
   ImGui::Spacing();
   ImGui::Separator();
   ImGui::TextUnformatted("AI search settings");
-  ImGui::TextDisabled("Player vs AI uses White AI settings.");
-  ImGui::TextDisabled("Set temperature or num_sampling_moves to 0 to disable sampling.");
+  ImGui::TextDisabled("Player vs AI uses AI Player 1 settings.");
+  ImGui::TextDisabled(
+      "Set temperature or num_sampling_moves to 0 to disable sampling.");
   bool valid_ai_options = true;
-  for (Player color : {Player::kBlack, Player::kWhite}) {
-    ImGui::PushID(static_cast<int>(color));
-    ImGui::TextUnformatted(color == Player::kBlack ? "Black AI" : "White AI");
-    auto& options = settings_ai_options_[static_cast<size_t>(color)];
+  for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
+    ImGui::PushID(static_cast<int>(player));
+    const char* name =
+        player == AIPlayerId::kPlayer1 ? "AI Player 1" : "AI Player 2";
+    ImGui::TextUnformatted(name);
+    auto& options = settings_ai_options_[static_cast<size_t>(player)];
     ImGui::SetNextItemWidth(160.0f);
     ImGui::InputInt("num_playouts", &options.num_playouts);
     ImGui::SetNextItemWidth(160.0f);
@@ -647,9 +696,9 @@ void App::DrawSettings() {
     config_.set_undo_enabled(settings_undo_enabled_);
     config_.set_time_limit_enabled(settings_time_enabled_);
     config_.set_time_limit_seconds(settings_time_seconds_);
-    for (Player color : {Player::kBlack, Player::kWhite}) {
-      config_.set_ai_options(color,
-                             settings_ai_options_[static_cast<size_t>(color)]);
+    for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
+      config_.set_ai_options(
+          player, settings_ai_options_[static_cast<size_t>(player)]);
     }
     config_.Save();
     state_ = AppState::kMainMenu;
