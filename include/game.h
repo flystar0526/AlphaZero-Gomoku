@@ -29,8 +29,8 @@ class Game {
   // Checks human turn timers and transitions to kTimeout if time expired.
   void Update();
 
-  // Plays a move at (row, col) if legal and the game is ongoing.
-  bool TryPlaceStone(int row, int col);
+  // Plays `action` if legal and the game is ongoing.
+  bool TryPlaceStone(Action action);
 
   // Reverts the last full turn (two plies) so the same player moves again.
   void Undo();

@@ -58,15 +58,13 @@ float Game::GetSecondsRemaining() const {
   return std::max(0.0f, remaining);
 }
 
-bool Game::TryPlaceStone(int row, int col) {
+bool Game::TryPlaceStone(Action action) {
   // Re-check the timer so expired turns cannot slip a move in between frames.
   Update();
-  if (state_ != State::kPlaying || !IsValidCell(row, col)) return false;
+  if (state_ != State::kPlaying || !position_.IsLegalMove(action)) return false;
 
-  const Action action = ToAction(row, col);
-  if (!position_.IsLegalMove(action)) return false;
-
-  record_.AddMove({next_move_number(), current_player(), row, col});
+  record_.AddMove({next_move_number(), current_player(), ActionRow(action),
+                   ActionCol(action)});
   position_.PlayMove(action);
 
   if (position_.winner().has_value()) {

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <utility>
+#include <optional>
 
 #include "board.h"
 
@@ -11,17 +11,15 @@ class Grid {
   // Draws the 15x15 gomoku board at the current ImGui cursor position.
   // Stones are drawn as filled circles (black or white).
   // A semi-transparent hover preview is shown when the cell is empty.
-  // last_row/last_col: 0-indexed position of the most recently placed stone
-  // (pass -1 to disable the indicator).
+  // `last_move` marks the most recently placed stone, if any.
   //
-  // Returns the (row, col) of the intersection clicked this frame,
-  // or {-1, -1} if no click occurred.
-  static std::pair<int, int> DrawBoard(const Board& board,
-                                       int last_row = -1, int last_col = -1);
+  // Returns the empty intersection clicked this frame, if any.
+  static std::optional<Action> DrawBoard(
+      const Board& board, std::optional<Action> last_move = std::nullopt);
 
   // Same as DrawBoard but read-only (no hover preview, no click detection).
   static void DrawBoardReadOnly(const Board& board,
-                                int last_row = -1, int last_col = -1);
+                                std::optional<Action> last_move = std::nullopt);
 
   // Board geometry constants (pixels).
   static constexpr float kCellSize = 40.0f;

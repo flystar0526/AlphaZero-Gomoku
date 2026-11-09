@@ -165,15 +165,15 @@ void GameUndoAndReplay() {
   config.set_time_limit_enabled(false);
   Game game(config);
   game.Start();
-  CHECK(!game.TryPlaceStone(-1, 0));
-  CHECK(!game.TryPlaceStone(0, kBoardSize));
+  CHECK(!game.TryPlaceStone(-1));
+  CHECK(!game.TryPlaceStone(kActionCount));
   CHECK(game.record().size() == 0);
-  CHECK(game.TryPlaceStone(0, 1));
-  CHECK(!game.TryPlaceStone(0, 1));
-  CHECK(game.TryPlaceStone(14, 12));
+  CHECK(game.TryPlaceStone(ToAction(0, 1)));
+  CHECK(!game.TryPlaceStone(ToAction(0, 1)));
+  CHECK(game.TryPlaceStone(ToAction(14, 12)));
   const auto before = PolicyValueNetwork::EncodeFeatures(game.position());
-  CHECK(game.TryPlaceStone(4, 6));
-  CHECK(game.TryPlaceStone(9, 8));
+  CHECK(game.TryPlaceStone(ToAction(4, 6)));
+  CHECK(game.TryPlaceStone(ToAction(9, 8)));
   game.Undo();
   CHECK(PolicyValueNetwork::EncodeFeatures(game.position()) == before);
   CHECK(game.current_player() == Player::kBlack);
@@ -188,13 +188,13 @@ void GameUndoAndReplay() {
   CHECK(game.board().stone_count() == 0);
 
   for (int col = 0; col < 4; ++col) {
-    CHECK(game.TryPlaceStone(7, col));
-    CHECK(game.TryPlaceStone(0, col));
+    CHECK(game.TryPlaceStone(ToAction(7, col)));
+    CHECK(game.TryPlaceStone(ToAction(0, col)));
   }
-  CHECK(game.TryPlaceStone(7, 4));
+  CHECK(game.TryPlaceStone(ToAction(7, 4)));
   CHECK(game.state() == Game::State::kWin);
   CHECK(game.winner() == Player::kBlack);
-  CHECK(!game.TryPlaceStone(10, 10));
+  CHECK(!game.TryPlaceStone(ToAction(10, 10)));
   auto moves = game.record().moves();
   CHECK(GamePosition::Rebuild(moves, static_cast<int>(moves.size()))->winner() == Player::kBlack);
   moves.push_back({10, Player::kWhite, 10, 10});
@@ -208,7 +208,7 @@ void GameUndoAndReplay() {
 
   // Verify Forfeit transitions state and assigns the opponent as winner.
   game.Start();
-  CHECK(game.TryPlaceStone(7, 7));  // Black plays; now White's turn.
+  CHECK(game.TryPlaceStone(ToAction(7, 7)));  // Black plays; now White's turn.
   game.Forfeit();
   CHECK(game.state() == Game::State::kForfeit);
   CHECK(game.winner() == Player::kBlack);
@@ -220,7 +220,7 @@ void GameUndoAndReplay() {
   config.set_time_limit_enabled(true);
   config.set_time_limit_seconds(0);
   Game timeout_game(config);
-  CHECK(!timeout_game.TryPlaceStone(0, 0));
+  CHECK(!timeout_game.TryPlaceStone(ToAction(0, 0)));
   CHECK(timeout_game.state() == Game::State::kTimeout);
   CHECK(timeout_game.winner() == Player::kWhite);
   CHECK(timeout_game.board().stone_count() == 0);
@@ -240,7 +240,7 @@ void GameModesAndTimers() {
   CHECK(!human.GetAIPlayerId(Player::kBlack));
   CHECK(!human.GetAIPlayerId(Player::kWhite));
   CHECK(human.GetSecondsRemaining() > 0.0f);
-  CHECK(human.TryPlaceStone(7, 7));
+  CHECK(human.TryPlaceStone(ToAction(7, 7)));
   CHECK(human.GetSecondsRemaining() > 0.0f);
 
   Game mixed(config, Game::Mode::kPlayerVsAI);
@@ -249,11 +249,11 @@ void GameModesAndTimers() {
   CHECK(!mixed.GetAIPlayerId(Player::kBlack));
   CHECK(mixed.GetAIPlayerId(Player::kWhite) == AIPlayerId::kPlayer1);
   CHECK(mixed.GetSecondsRemaining() > 0.0f);
-  CHECK(mixed.TryPlaceStone(7, 7));
+  CHECK(mixed.TryPlaceStone(ToAction(7, 7)));
   CHECK(mixed.GetSecondsRemaining() == -1.0f);
   mixed.Update();  // Disabled timer sentinel on AI turns must not time out.
   CHECK(mixed.state() == Game::State::kPlaying);
-  CHECK(mixed.TryPlaceStone(7, 8));
+  CHECK(mixed.TryPlaceStone(ToAction(7, 8)));
   CHECK(mixed.GetSecondsRemaining() > 59.0f);
   mixed.Undo();
   CHECK(mixed.board().stone_count() == 0);
@@ -276,12 +276,12 @@ void GameModesAndTimers() {
     CHECK(self_play.GetSecondsRemaining() == -1.0f);
     self_play.Update();
     CHECK(self_play.state() == Game::State::kPlaying);
-    CHECK(self_play.TryPlaceStone(7, col));
-    CHECK(self_play.TryPlaceStone(0, col));
+    CHECK(self_play.TryPlaceStone(ToAction(7, col)));
+    CHECK(self_play.TryPlaceStone(ToAction(0, col)));
   }
   self_play.Undo();  // Undo is disabled in AI vs AI.
   CHECK(self_play.record().size() == 8);
-  CHECK(self_play.TryPlaceStone(7, 4));
+  CHECK(self_play.TryPlaceStone(ToAction(7, 4)));
   CHECK(self_play.state() == Game::State::kWin);
   const auto record = self_play.FinalizeRecord();
   CHECK(!record.metadata().time_limit_enabled);
@@ -767,10 +767,10 @@ void MoveSamplingBoundaries() {
   config.set_time_limit_enabled(false);
   Game game(config, Game::Mode::kPlayerVsAI);
   CHECK(count_alternatives(game.position(), player) > 0);
-  for (int col = 14; col > 11; --col) CHECK(game.TryPlaceStone(14, col));
+  for (int col = 14; col > 11; --col) CHECK(game.TryPlaceStone(ToAction(14, col)));
   CHECK(game.board().stone_count() == 3);
   CHECK(count_alternatives(game.position(), player) > 0);
-  CHECK(game.TryPlaceStone(14, 11));
+  CHECK(game.TryPlaceStone(ToAction(14, 11)));
   CHECK(game.board().stone_count() == 4);
   CHECK(count_alternatives(game.position(), player) == 0);
 
@@ -857,7 +857,7 @@ void IndependentAIPlayers() {
       });
       const auto action = result.get();
       CHECK(action.has_value());
-      CHECK(game.TryPlaceStone(ActionRow(*action), ActionCol(*action)));
+      CHECK(game.TryPlaceStone(*action));
       black.ObserveMove(*action);
       white.ObserveMove(*action);
       CHECK(game.record().size() <= kActionCount);
@@ -893,7 +893,7 @@ void FullGameWithUndo() {
   while (game.state() == Game::State::kPlaying) {
     const auto action = player.PickMove(game.position());
     CHECK(action.has_value());
-    CHECK(game.TryPlaceStone(ActionRow(*action), ActionCol(*action)));
+    CHECK(game.TryPlaceStone(*action));
     player.ObserveMove(*action);
     if (!undone && game.record().size() == 8) {
       game.Undo();

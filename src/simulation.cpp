@@ -315,8 +315,7 @@ GameResult PlayGame(int game_number, const Seats& seats, Game& game,
                                  timing.selection_ms, timing.expansion_ms,
                                  timing.evaluation_ms, timing.backup_ms};
 
-    if (!action ||
-        !game.TryPlaceStone(ActionRow(*action), ActionCol(*action))) {
+    if (!action || !game.TryPlaceStone(*action)) {
       throw std::runtime_error("AI returned no legal move");
     }
     // Both trees must follow the board, as in the GUI's AI vs AI mode.

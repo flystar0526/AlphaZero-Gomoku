@@ -49,9 +49,8 @@ void DrawStone(ImDrawList* dl, ImVec2 center, Cell cell) {
 }
 
 // Core drawing logic. interactive=true enables hover + click.
-// last_row/last_col mark the most recently placed stone (-1 to disable).
-std::pair<int, int> DrawBoardImpl(const Board& board, bool interactive,
-                                  int last_row, int last_col) {
+std::optional<Action> DrawBoardImpl(const Board& board, bool interactive,
+                                    std::optional<Action> last_move) {
   ImDrawList* dl = ImGui::GetWindowDrawList();
   ImVec2 origin = ImGui::GetCursorScreenPos();
 
@@ -79,7 +78,7 @@ std::pair<int, int> DrawBoardImpl(const Board& board, bool interactive,
   }
 
   // Hover preview (drawn before stones so it sits behind them)
-  int hover_row = -1, hover_col = -1;
+  std::optional<Action> hover;
   if (interactive && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
                                             ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
     ImVec2 mouse = ImGui::GetMousePos();
@@ -90,8 +89,7 @@ std::pair<int, int> DrawBoardImpl(const Board& board, bool interactive,
     int row = static_cast<int>(rel_y / Grid::kCellSize + 0.5f);
     if (IsValidCell(row, col)) {
       if (board.GetCell(ToAction(row, col)) == Cell::kEmpty) {
-        hover_row = row;
-        hover_col = col;
+        hover = ToAction(row, col);
         ImVec2 center = IntersectionPos(origin, row, col);
         dl->AddCircleFilled(center, Grid::kStoneRadius,
                             IM_COL32(80, 80, 80, 90), 40);
@@ -111,8 +109,9 @@ std::pair<int, int> DrawBoardImpl(const Board& board, bool interactive,
   }
 
   // Last-move indicator
-  if (last_row >= 0 && last_col >= 0) {
-    ImVec2 center = IntersectionPos(origin, last_row, last_col);
+  if (last_move) {
+    ImVec2 center =
+        IntersectionPos(origin, ActionRow(*last_move), ActionCol(*last_move));
     dl->AddCircleFilled(center, 4.5f, kLastMoveDot, 12);
   }
 
@@ -121,12 +120,9 @@ std::pair<int, int> DrawBoardImpl(const Board& board, bool interactive,
 
   // Click detection
   if (interactive && ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
-    if (hover_row >= 0) {
-      return {hover_row, hover_col};
-    }
+    return hover;
   }
-
-  return {-1, -1};
+  return std::nullopt;
 }
 
 }  // namespace
@@ -135,11 +131,12 @@ std::pair<int, int> DrawBoardImpl(const Board& board, bool interactive,
 // Public API
 // ---------------------------------------------------------------------------
 
-std::pair<int, int> Grid::DrawBoard(const Board& board,
-                                    int last_row, int last_col) {
-  return DrawBoardImpl(board, /*interactive=*/true, last_row, last_col);
+std::optional<Action> Grid::DrawBoard(const Board& board,
+                                      std::optional<Action> last_move) {
+  return DrawBoardImpl(board, /*interactive=*/true, last_move);
 }
 
-void Grid::DrawBoardReadOnly(const Board& board, int last_row, int last_col) {
-  DrawBoardImpl(board, /*interactive=*/false, last_row, last_col);
+void Grid::DrawBoardReadOnly(const Board& board,
+                             std::optional<Action> last_move) {
+  DrawBoardImpl(board, /*interactive=*/false, last_move);
 }

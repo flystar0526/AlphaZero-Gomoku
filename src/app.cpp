@@ -344,11 +344,8 @@ void App::DrawGame() {
       if (ai_result_.wait_for(std::chrono::seconds(0)) ==
           std::future_status::ready) {
         const auto move = ai_result_.get();
-        if (!move || !IsValidAction(*move)) {
+        if (!move || !game_->TryPlaceStone(*move)) {
           throw std::runtime_error("AI returned no legal move");
-        }
-        if (!game_->TryPlaceStone(ActionRow(*move), ActionCol(*move))) {
-          throw std::runtime_error("AI returned an illegal move");
         }
         for (auto& player : ai_players_) {
           if (player) player->ObserveMove(*move);
@@ -361,21 +358,19 @@ void App::DrawGame() {
     }
   }
 
-  const auto last = game_->position().last_move();
-  const int last_row = last ? ActionRow(*last) : -1;
-  const int last_col = last ? ActionCol(*last) : -1;
   const float offset_x =
       (ImGui::GetContentRegionAvail().x - Grid::kCanvasSize) * 0.5f;
   if (offset_x > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset_x);
 
   // Keep the board read-only for the entire frame of an AI turn.
+  const auto last_move = game_->position().last_move();
   if (ai_turn) {
-    Grid::DrawBoardReadOnly(game_->board(), last_row, last_col);
+    Grid::DrawBoardReadOnly(game_->board(), last_move);
   } else {
-    auto [row, col] = Grid::DrawBoard(game_->board(), last_row, last_col);
-    if (row >= 0 && game_->TryPlaceStone(row, col)) {
+    const auto clicked = Grid::DrawBoard(game_->board(), last_move);
+    if (clicked && game_->TryPlaceStone(*clicked)) {
       for (auto& player : ai_players_) {
-        if (player) player->ObserveMove(ToAction(row, col));
+        if (player) player->ObserveMove(*clicked);
       }
     }
   }
@@ -429,13 +424,10 @@ void App::DrawGameOver() {
   ImGui::Spacing();
 
   // Board.
-  const auto last = game_->position().last_move();
-  const int last_row = last ? ActionRow(*last) : -1;
-  const int last_col = last ? ActionCol(*last) : -1;
   float avail_x = ImGui::GetContentRegionAvail().x;
   float offset_x = (avail_x - Grid::kCanvasSize) * 0.5f;
   if (offset_x > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset_x);
-  Grid::DrawBoardReadOnly(game_->board(), last_row, last_col);
+  Grid::DrawBoardReadOnly(game_->board(), game_->position().last_move());
 
   ImGui::Spacing();
 
@@ -608,17 +600,16 @@ void App::DrawReplay() {
     // Board at current step.
     Board b = replay_.BoardAtStep(replay_cursor_);
     // Last move indicator: the stone placed at cursor step.
-    int lr = -1, lc = -1;
+    std::optional<Action> last_move;
     if (replay_cursor_ > 0) {
       const auto& mv = replay_.record().moves()[replay_cursor_ - 1];
-      lr = mv.row;
-      lc = mv.col;
+      last_move = ToAction(mv.row, mv.col);
     }
 
     float avail_x = ImGui::GetContentRegionAvail().x;
     float offset_x = (avail_x - Grid::kCanvasSize) * 0.5f;
     if (offset_x > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset_x);
-    Grid::DrawBoardReadOnly(b, lr, lc);
+    Grid::DrawBoardReadOnly(b, last_move);
   }
 
   ImGui::Spacing();
