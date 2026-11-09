@@ -1,12 +1,18 @@
 #pragma once
 
 #include <array>
+#include <ostream>
 #include <string>
 
 #include "mcts.h"
 
 // Identifies an AI's settings independently of its stone color.
 enum class AIPlayerId { kPlayer1, kPlayer2 };
+
+// Writes `options` as "ai_player_N_<field> = value" lines, the format used for
+// AI settings in gomoku.cfg. Floats are written with round-trip precision.
+void WriteAIOptions(std::ostream& out, AIPlayerId player,
+                    const SearchOptions& options);
 
 // Holds all user-configurable game settings.
 // Loaded from and persisted to gomoku.cfg on disk.

@@ -3,11 +3,13 @@
 #include <cerrno>
 #include <cstdlib>
 #include <fstream>
-#include <iomanip>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+
+#include "key_value.h"
 
 namespace {
 
@@ -15,34 +17,64 @@ constexpr std::string_view ConfigPrefix(AIPlayerId player) {
   return player == AIPlayerId::kPlayer1 ? "ai_player_1_" : "ai_player_2_";
 }
 
-void ParseIntOption(const std::string& text, SearchOptions& options, int& field,
-                    int default_value) {
-  field = default_value;
+// Visits each SearchOptions field with its config key suffix. This is the only
+// list of AI option names; parsing and writing both use it.
+template <typename Visitor>
+void ForEachSearchOption(Visitor&& visit) {
+  visit("num_playouts", &SearchOptions::num_playouts);
+  visit("c_puct", &SearchOptions::c_puct);
+  visit("temperature", &SearchOptions::temperature);
+  visit("num_sampling_moves", &SearchOptions::num_sampling_moves);
+}
+
+std::optional<int> ParseNumber(const std::string& text, int*) {
   try {
     size_t parsed = 0;
     const int value = std::stoi(text, &parsed);
-    if (parsed == text.size()) {
-      field = value;
-      if (!options.IsValid()) field = default_value;
-    }
+    if (parsed == text.size()) return value;
   } catch (const std::exception&) {
   }
+  return std::nullopt;
 }
 
-void ParseFloatOption(const std::string& text, SearchOptions& options,
-                      float& field, float default_value) {
-  field = default_value;
+std::optional<float> ParseNumber(const std::string& text, float*) {
   char* end = nullptr;
   errno = 0;
   const float value = std::strtof(text.c_str(), &end);
   if (end != text.c_str() && end == text.c_str() + text.size() &&
       (errno != ERANGE || value != 0.0f)) {
-    field = value;
-    if (!options.IsValid()) field = default_value;
+    return value;
   }
+  return std::nullopt;
+}
+
+// Sets the option named `name` from `text`. Unparsable or invalid values fall
+// back to the field's default. Unknown names are ignored.
+void ParseSearchOption(std::string_view name, const std::string& text,
+                       SearchOptions& options) {
+  ForEachSearchOption([&](std::string_view option_name, auto member) {
+    if (option_name != name) return;
+    auto& field = options.*member;
+    const auto value = ParseNumber(text, &field);
+    field = value ? *value : SearchOptions{}.*member;
+    if (!options.IsValid()) field = SearchOptions{}.*member;
+  });
 }
 
 }  // namespace
+
+void WriteAIOptions(std::ostream& out, AIPlayerId player,
+                    const SearchOptions& options) {
+  const std::ios_base::fmtflags flags = out.flags();
+  const std::streamsize precision = out.precision();
+  out.unsetf(std::ios_base::floatfield);
+  out.precision(std::numeric_limits<float>::max_digits10);
+  ForEachSearchOption([&](std::string_view name, auto member) {
+    out << ConfigPrefix(player) << name << " = " << options.*member << '\n';
+  });
+  out.flags(flags);
+  out.precision(precision);
+}
 
 Configuration::Configuration() {
   std::ifstream file(kConfigPath);
@@ -51,20 +83,8 @@ Configuration::Configuration() {
   std::string line;
   while (std::getline(file, line)) {
     if (line.empty() || line[0] == '#') continue;
-    auto eq = line.find('=');
-    if (eq == std::string::npos) continue;
-    std::string key = line.substr(0, eq);
-    std::string val = line.substr(eq + 1);
-    // Trim whitespace.
-    auto trim = [](std::string& s) {
-      while (!s.empty() && (s.front() == ' ' || s.front() == '\t'))
-        s.erase(s.begin());
-      while (!s.empty() &&
-             (s.back() == ' ' || s.back() == '\t' || s.back() == '\r'))
-        s.pop_back();
-    };
-    trim(key);
-    trim(val);
+    std::string key, val;
+    if (!SplitKeyValue(line, key, val)) continue;
     if (key == "undo_enabled") {
       undo_enabled_ = (val == "true");
     } else if (key == "time_limit_enabled") {
@@ -75,26 +95,11 @@ Configuration::Configuration() {
       } catch (...) {
       }
     } else {
-      // Invalid AI search options fall back to defaults.
-      const SearchOptions defaults;
       for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
         const std::string_view prefix = ConfigPrefix(player);
         if (std::string_view(key).substr(0, prefix.size()) != prefix) continue;
-        const std::string_view option_name =
-            std::string_view(key).substr(prefix.size());
-        auto& options = ai_options_[static_cast<size_t>(player)];
-        if (option_name == "num_playouts") {
-          ParseIntOption(val, options, options.num_playouts,
-                         defaults.num_playouts);
-        } else if (option_name == "c_puct") {
-          ParseFloatOption(val, options, options.c_puct, defaults.c_puct);
-        } else if (option_name == "temperature") {
-          ParseFloatOption(val, options, options.temperature,
-                           defaults.temperature);
-        } else if (option_name == "num_sampling_moves") {
-          ParseIntOption(val, options, options.num_sampling_moves,
-                         defaults.num_sampling_moves);
-        }
+        ParseSearchOption(std::string_view(key).substr(prefix.size()), val,
+                          ai_options_[static_cast<size_t>(player)]);
       }
     }
   }
@@ -108,15 +113,8 @@ void Configuration::Save() const {
   file << "time_limit_enabled = " << (time_limit_enabled_ ? "true" : "false")
        << "\n";
   file << "time_limit_seconds = " << time_limit_seconds_ << "\n";
-  file << std::setprecision(std::numeric_limits<float>::max_digits10);
   for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
-    const std::string_view prefix = ConfigPrefix(player);
-    const auto& options = ai_options(player);
-    file << prefix << "num_playouts = " << options.num_playouts << "\n";
-    file << prefix << "c_puct = " << options.c_puct << "\n";
-    file << prefix << "temperature = " << options.temperature << "\n";
-    file << prefix << "num_sampling_moves = " << options.num_sampling_moves
-         << "\n";
+    WriteAIOptions(file, player, ai_options(player));
   }
 }
 

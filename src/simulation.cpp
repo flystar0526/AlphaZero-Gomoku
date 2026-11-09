@@ -215,20 +215,13 @@ void WriteSummary(const std::filesystem::path& directory,
   if (!error.empty()) out << "error = " << error << '\n';
 
   // Search settings of each AI.
-  out << "\n[configuration]\n" << std::setprecision(9);
+  out << "\n[configuration]\n";
   for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
-    const auto& search = config.ai_options(player);
-    const std::string prefix =
-        "ai_player_" + std::to_string(static_cast<int>(player) + 1) + '_';
-    out << prefix << "num_playouts = " << search.num_playouts << '\n'
-        << prefix << "c_puct = " << search.c_puct << '\n'
-        << prefix << "temperature = " << search.temperature << '\n'
-        << prefix << "num_sampling_moves = " << search.num_sampling_moves
-        << '\n';
+    WriteAIOptions(out, player, config.ai_options(player));
   }
 
   // Win rate of each color regardless of which AI played it.
-  out << std::setprecision(6) << "\n[overall]\ncolor,games,wins,win_rate_pct\n";
+  out << "\n[overall]\ncolor,games,wins,win_rate_pct\n";
   for (Player color : kColors) {
     const int wins = ColorTotal(stats, color).wins;
     out << ColorName(color) << ',' << completed_games << ',' << wins << ',';

@@ -9,6 +9,8 @@
 #include <system_error>
 #include <utility>
 
+#include "key_value.h"
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -23,29 +25,6 @@ std::optional<Player> ParsePlayer(const std::string& s) {
   if (s == "black") return Player::kBlack;
   if (s == "white") return Player::kWhite;
   return std::nullopt;
-}
-
-void TrimLine(std::string& s) {
-  while (!s.empty() && (s.back() == '\r' || s.back() == '\n' ||
-                        s.back() == ' ' || s.back() == '\t'))
-    s.pop_back();
-}
-
-// Splits "key = value" into key and value strings.
-bool SplitKeyValue(const std::string& line, std::string& key,
-                   std::string& value) {
-  auto eq = line.find('=');
-  if (eq == std::string::npos) return false;
-  key = line.substr(0, eq);
-  value = line.substr(eq + 1);
-  auto trim = [](std::string& s) {
-    while (!s.empty() && (s.front() == ' ' || s.front() == '\t'))
-      s.erase(s.begin());
-    while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
-  };
-  trim(key);
-  trim(value);
-  return true;
 }
 
 }  // namespace
@@ -125,7 +104,7 @@ std::optional<GameRecord> FileManager::Load(const std::string& path) try {
 
   std::string line;
   while (std::getline(in, line)) {
-    TrimLine(line);
+    TrimWhitespace(line);
     if (line.empty() || line[0] == '#') continue;
 
     if (line == "[metadata]") {
