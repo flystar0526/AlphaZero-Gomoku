@@ -523,7 +523,6 @@ void App::LoadReplay(const std::string& path) {
     return;
   }
   replay_error_msg_.clear();
-  replay_cursor_ = 0;
   replay_files_open_ = false;
 }
 
@@ -581,10 +580,10 @@ void App::DrawReplay() {
                 ImGui::IsKeyPressed(ImGuiKey_RightArrow) ||
                 ImGui::IsKeyPressed(ImGuiKey_N);
     ImGui::SameLine();
-    ImGui::Text("Step %d / %d", replay_cursor_, replay_.total_moves());
+    ImGui::Text("Step %d / %d", replay_.step(), replay_.total_moves());
 
-    if (prev && replay_cursor_ > 0) --replay_cursor_;
-    if (next && replay_cursor_ < replay_.total_moves()) ++replay_cursor_;
+    if (prev) replay_.Seek(replay_.step() - 1);
+    if (next) replay_.Seek(replay_.step() + 1);
 
     // Metadata.
     const GameMetadata& meta = replay_.record().metadata();
@@ -596,19 +595,11 @@ void App::DrawReplay() {
 
     ImGui::Spacing();
 
-    // Board at current step.
-    Board b = replay_.BoardAtStep(replay_cursor_);
-    // Last move indicator: the stone placed at cursor step.
-    std::optional<Action> last_move;
-    if (replay_cursor_ > 0) {
-      const auto& mv = replay_.record().moves()[replay_cursor_ - 1];
-      last_move = ToAction(mv.row, mv.col);
-    }
-
     float avail_x = ImGui::GetContentRegionAvail().x;
     float offset_x = (avail_x - Grid::kCanvasSize) * 0.5f;
     if (offset_x > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset_x);
-    Grid::DrawBoardReadOnly(b, last_move);
+    const GamePosition& position = replay_.position();
+    Grid::DrawBoardReadOnly(position.board(), position.last_move());
   }
 
   ImGui::Spacing();
@@ -617,7 +608,6 @@ void App::DrawReplay() {
 
   if (ImGui::Button("Back to Menu", {140, 32})) {
     replay_ = ReplayController();
-    replay_cursor_ = 0;
     replay_path_buf_[0] = '\0';
     replay_error_msg_.clear();
     state_ = AppState::kMainMenu;

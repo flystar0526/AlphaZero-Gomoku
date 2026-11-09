@@ -478,7 +478,9 @@ void SavedGameFiles() {
   for (const auto& path : *paths) {
     CHECK(replay.Load(path));
     CHECK(replay.total_moves() == 1);
-    CHECK(replay.BoardAtStep(1).GetCell(ToAction(7, 7)) == Cell::kBlack);
+    CHECK(replay.position().board().stone_count() == 0);
+    replay.Seek(1);
+    CHECK(replay.position().board().GetCell(ToAction(7, 7)) == Cell::kBlack);
   }
 
   CHECK(FileManager::Save(record, "saves/c.gom"));
@@ -505,11 +507,19 @@ void FileValidation() {
   CHECK(FileManager::Save(record, path.string()));
   ReplayController replay;
   CHECK(replay.Load(path.string()));
-  CHECK(replay.BoardAtStep(0).stone_count() == 0);
-  CHECK(replay.BoardAtStep(1).GetCell(ToAction(0, 1)) == Cell::kBlack);
-  CHECK(replay.BoardAtStep(2).GetCell(ToAction(14, 12)) == Cell::kWhite);
-  CHECK(replay.BoardAtStep(99).stone_count() == 2);
-  CHECK(replay.BoardAtStep(-1).stone_count() == 0);
+  CHECK(replay.step() == 0);
+  CHECK(replay.position().board().stone_count() == 0);
+  CHECK(!replay.position().last_move().has_value());
+  replay.Seek(1);
+  CHECK(replay.position().board().GetCell(ToAction(0, 1)) == Cell::kBlack);
+  CHECK(replay.position().last_move() == ToAction(0, 1));
+  replay.Seek(2);
+  CHECK(replay.position().board().GetCell(ToAction(14, 12)) == Cell::kWhite);
+  CHECK(replay.position().last_move() == ToAction(14, 12));
+  replay.Seek(99);
+  CHECK(replay.step() == 2 && replay.position().board().stone_count() == 2);
+  replay.Seek(-1);
+  CHECK(replay.step() == 0 && replay.position().board().stone_count() == 0);
 
   for (const auto& bad_moves : std::vector<std::vector<MoveRecord>>{
            {{1, Player::kBlack, 0, 0}, {2, Player::kWhite, 0, 0}},
@@ -861,7 +871,8 @@ void IndependentAIPlayers() {
     ReplayController replay;
     CHECK(replay.Load(path.string()));
     CHECK(replay.total_moves() == record.size());
-    CHECK(replay.BoardAtStep(record.size()).stone_count() == record.size());
+    replay.Seek(record.size());
+    CHECK(replay.position().board().stone_count() == record.size());
   }
 }
 

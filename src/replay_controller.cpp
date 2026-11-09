@@ -1,6 +1,7 @@
 #include "replay_controller.h"
 
 #include <algorithm>
+#include <cassert>
 #include <optional>
 #include <utility>
 
@@ -13,12 +14,16 @@ bool ReplayController::Load(const std::string& path) {
     return false;
   }
   record_ = std::move(*loaded);
+  step_ = 0;
+  position_ = GamePosition();
   return true;
 }
 
-Board ReplayController::BoardAtStep(int step) const {
-  return GamePosition::Rebuild(record_.moves(),
-                               std::clamp(step, 0, record_.size()))
-      .value()
-      .board();
+void ReplayController::Seek(int step) {
+  step_ = std::clamp(step, 0, record_.size());
+  // Load() already verified every prefix of the record.
+  std::optional<GamePosition> position =
+      GamePosition::Rebuild(record_.moves(), step_);
+  assert(position.has_value());
+  position_ = *position;
 }

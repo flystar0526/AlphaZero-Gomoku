@@ -82,7 +82,6 @@ class App {
 
   // Replay.
   ReplayController replay_;
-  int replay_cursor_ = 0;
   char replay_path_buf_[512] = {};
   std::string replay_error_msg_;
   std::vector<ReplayFile> replay_files_;
