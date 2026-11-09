@@ -1,15 +1,18 @@
 #include "replay_controller.h"
 
 #include <algorithm>
+#include <optional>
+#include <utility>
 
 #include "file_manager.h"
 
 bool ReplayController::Load(const std::string& path) {
-  GameRecord tmp;
-  if (!FileManager::Load(path, &tmp)) return false;
+  std::optional<GameRecord> loaded = FileManager::Load(path);
   // Verify that the entire move sequence obeys game rules before accepting it.
-  if (!GamePosition::Rebuild(tmp.moves(), tmp.size())) return false;
-  record_ = tmp;
+  if (!loaded || !GamePosition::Rebuild(loaded->moves(), loaded->size())) {
+    return false;
+  }
+  record_ = std::move(*loaded);
   return true;
 }
 

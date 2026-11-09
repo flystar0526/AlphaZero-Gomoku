@@ -21,7 +21,7 @@ class GameRecord {
  public:
   void AddMove(const MoveRecord& move);
 
-  // Removes the last move. Used for undo.
+  // Removes the last move. Used for undo; requires a nonempty record.
   void RemoveLastMove();
 
   // Seals the record with final metadata after the game ends.

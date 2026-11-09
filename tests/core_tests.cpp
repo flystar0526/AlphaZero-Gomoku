@@ -452,13 +452,12 @@ void MoveSamplingConfiguration() {
 // Verifies saved-game file discovery.
 void SavedGameFiles() {
   ScopedTempDir temp_dir("test-saved-games");
-  std::vector<std::string> paths{"stale.gom"};
-  CHECK(FileManager::ListGameFiles("saves", &paths));
-  CHECK(paths.empty());
+  auto paths = FileManager::ListGameFiles("saves");
+  CHECK(paths && paths->empty());
 
   std::filesystem::create_directory("saves");
-  CHECK(FileManager::ListGameFiles("saves", &paths));
-  CHECK(paths.empty());
+  paths = FileManager::ListGameFiles("saves");
+  CHECK(paths && paths->empty());
 
   GameRecord record;
   record.AddMove({1, Player::kBlack, 7, 7});
@@ -472,10 +471,11 @@ void SavedGameFiles() {
   std::filesystem::create_directory("saves/nested.gom");
   CHECK(FileManager::Save(record, "saves/nested.gom/hidden.gom"));
 
-  CHECK(FileManager::ListGameFiles("saves", &paths));
-  CHECK(paths == std::vector<std::string>({"saves/a game.gom", "saves/b.gom"}));
+  paths = FileManager::ListGameFiles("saves");
+  CHECK(paths ==
+        std::vector<std::string>({"saves/a game.gom", "saves/b.gom"}));
   ReplayController replay;
-  for (const auto& path : paths) {
+  for (const auto& path : *paths) {
     CHECK(replay.Load(path));
     CHECK(replay.total_moves() == 1);
     CHECK(replay.BoardAtStep(1).GetCell(ToAction(7, 7)) == Cell::kBlack);
@@ -483,11 +483,10 @@ void SavedGameFiles() {
 
   CHECK(FileManager::Save(record, "saves/c.gom"));
   std::filesystem::remove("saves/b.gom");
-  CHECK(FileManager::ListGameFiles("saves", &paths));
-  CHECK(paths == std::vector<std::string>({"saves/a game.gom", "saves/c.gom"}));
-  CHECK(!FileManager::ListGameFiles("saves/notes.txt", &paths));
-  CHECK(paths.empty());
-  CHECK(!FileManager::ListGameFiles("saves", nullptr));
+  paths = FileManager::ListGameFiles("saves");
+  CHECK(paths ==
+        std::vector<std::string>({"saves/a game.gom", "saves/c.gom"}));
+  CHECK(!FileManager::ListGameFiles("saves/notes.txt"));
 }
 
 void FileValidation() {

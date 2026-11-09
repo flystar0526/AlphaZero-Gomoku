@@ -50,14 +50,14 @@ bool SplitKeyValue(const std::string& line, std::string& key,
 
 }  // namespace
 
-bool FileManager::ListGameFiles(const std::string& directory,
-                                std::vector<std::string>* paths) {
-  if (!paths) return false;
-  paths->clear();
-
+std::optional<std::vector<std::string>> FileManager::ListGameFiles(
+    const std::string& directory) {
   std::error_code error;
   std::filesystem::directory_iterator entry(directory, error);
-  if (error) return error == std::errc::no_such_file_or_directory;
+  if (error == std::errc::no_such_file_or_directory) {
+    return std::vector<std::string>{};
+  }
+  if (error) return std::nullopt;
 
   std::vector<std::string> files;
   const std::filesystem::directory_iterator end;
@@ -67,11 +67,10 @@ bool FileManager::ListGameFiles(const std::string& directory,
     }
     if (!error) entry.increment(error);
   }
-  if (error) return false;
+  if (error) return std::nullopt;
 
   std::sort(files.begin(), files.end());
-  *paths = std::move(files);
-  return true;
+  return files;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,10 +112,9 @@ bool FileManager::Save(const GameRecord& record, const std::string& path) {
 // FileManager::Load
 // ---------------------------------------------------------------------------
 
-bool FileManager::Load(const std::string& path, GameRecord* record) try {
-  if (!record) return false;
+std::optional<GameRecord> FileManager::Load(const std::string& path) try {
   std::ifstream in(path);
-  if (!in.is_open()) return false;
+  if (!in.is_open()) return std::nullopt;
 
   enum class Section { kNone, kMetadata, kMoves };
   Section section = Section::kNone;
@@ -142,7 +140,7 @@ bool FileManager::Load(const std::string& path, GameRecord* record) try {
 
     if (section == Section::kMetadata) {
       std::string key, value;
-      if (!SplitKeyValue(line, key, value)) return false;
+      if (!SplitKeyValue(line, key, value)) return std::nullopt;
       if (key == "date") {
         meta.date = value;
       } else if (key == "duration_sec") {
@@ -154,7 +152,7 @@ bool FileManager::Load(const std::string& path, GameRecord* record) try {
           meta.winner = std::nullopt;
         } else {
           meta.winner = ParsePlayer(value);
-          if (!meta.winner.has_value() && value != "draw") return false;
+          if (!meta.winner.has_value()) return std::nullopt;
         }
       } else if (key == "undo_enabled") {
         meta.undo_enabled = (value == "true");
@@ -167,24 +165,25 @@ bool FileManager::Load(const std::string& path, GameRecord* record) try {
       std::istringstream ss(line);
       MoveRecord m;
       std::string player_str;
-      if (!(ss >> m.move_number >> player_str >> m.row >> m.col)) return false;
+      if (!(ss >> m.move_number >> player_str >> m.row >> m.col)) {
+        return std::nullopt;
+      }
       auto p = ParsePlayer(player_str);
-      if (!p.has_value()) return false;
+      if (!p.has_value()) return std::nullopt;
       m.player = *p;
       moves.push_back(m);
     }
   }
 
   if (!metadata_complete || meta.total_moves != static_cast<int>(moves.size()))
-    return false;
+    return std::nullopt;
 
   GameRecord loaded;
   loaded.Finalize(meta);
   for (const auto& m : moves) loaded.AddMove(m);
-  *record = std::move(loaded);
-  return true;
+  return loaded;
 } catch (const std::invalid_argument&) {
-  return false;
+  return std::nullopt;
 } catch (const std::out_of_range&) {
-  return false;
+  return std::nullopt;
 }

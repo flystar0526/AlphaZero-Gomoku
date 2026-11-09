@@ -466,8 +466,7 @@ void App::DrawGameOver() {
           std::filesystem::create_directories(p.parent_path(), ec);
         }
       }
-      if (finished_record_.has_value() &&
-          FileManager::Save(*finished_record_, path)) {
+      if (FileManager::Save(*finished_record_, path)) {
         save_status_msg_ = "Saved to: " + path;
       } else {
         save_status_msg_ = "Failed to save!";
@@ -506,13 +505,13 @@ void App::DrawGameOver() {
 void App::RefreshReplayFiles() {
   replay_files_.clear();
   replay_files_error_msg_.clear();
-  std::vector<std::string> paths;
-  if (!FileManager::ListGameFiles("saves", &paths)) {
+  auto paths = FileManager::ListGameFiles("saves");
+  if (!paths) {
     replay_files_error_msg_ = "Failed to read saves/.";
     return;
   }
-  replay_files_.reserve(paths.size());
-  for (auto& path : paths) {
+  replay_files_.reserve(paths->size());
+  for (auto& path : *paths) {
     std::string filename = std::filesystem::path(path).filename().string();
     replay_files_.push_back({std::move(path), std::move(filename)});
   }
