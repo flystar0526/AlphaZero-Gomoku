@@ -61,6 +61,11 @@ struct SearchTiming {
 };
 
 // Monte Carlo Tree Search engine with subtree reuse.
+//
+// Each search runs `num_threads` workers over one shared tree (tree
+// parallelization with per-node spinlocks). Workers queue leaf positions for
+// a batch evaluator thread that sends up to `batch_size` positions to the
+// network at once.
 class MCTS {
  public:
   explicit MCTS(SearchOptions options = {});
@@ -69,6 +74,8 @@ class MCTS {
   ~MCTS();
 
   // Runs playouts from `position` and returns visit statistics for legal moves.
+  // Phase timings are summed over all workers. If the evaluator throws, the
+  // tree is reset and the first error is rethrown.
   std::vector<MoveVisits> Search(const GamePosition& position,
                                  PolicyValueEvaluator& evaluator,
                                  SearchTiming* timing = nullptr);
@@ -79,13 +86,15 @@ class MCTS {
   // Resets the search tree to a fresh root node.
   void Reset();
 
+  // Returns the number of pre-updates (virtual losses or unobserved samples)
+  // still applied anywhere in the tree. Always zero between searches.
+  int CountInFlight() const;
+
   const SearchOptions& options() const { return options_; }
 
  private:
   struct TreeNode;
-
-  void Playout(GamePosition position, PolicyValueEvaluator& evaluator,
-               SearchTiming* timing);
+  class Worker;
 
   SearchOptions options_;
   std::unique_ptr<TreeNode> root_;

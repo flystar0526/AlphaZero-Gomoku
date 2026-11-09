@@ -13,6 +13,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "ai_player.h"
@@ -856,6 +857,189 @@ void TreeLifecycleAndAI() {
   CheckThrows<std::invalid_argument>([] { AIPlayer no_model(nullptr); });
 }
 
+// Evaluator that records each batch and can slow down inference.
+class BatchRecorder : public PolicyValueEvaluator {
+ public:
+  std::vector<std::vector<GamePosition>> batches;
+  std::chrono::microseconds delay{0};
+  std::array<float, kActionCount> policy{};
+  bool fail = false;
+
+  BatchRecorder() { policy.fill(1.f / kActionCount); }
+
+  Evaluation Evaluate(const GamePosition& position) override {
+    return EvaluateBatch({position}).front();
+  }
+
+  std::vector<Evaluation> EvaluateBatch(
+      const std::vector<GamePosition>& positions) override {
+    if (fail) throw std::runtime_error("model failed");
+    batches.push_back(positions);
+    if (delay.count() > 0) std::this_thread::sleep_for(delay);
+    std::vector<Evaluation> results(positions.size());
+    for (Evaluation& result : results) {
+      result.policy = policy;
+      result.value = 0.1f;
+    }
+    return results;
+  }
+
+  size_t positions() const {
+    size_t total = 0;
+    for (const auto& batch : batches) total += batch.size();
+    return total;
+  }
+};
+
+SearchOptions ParallelOptions(ParallelMode mode, int threads, int batch,
+                              int playouts) {
+  SearchOptions options;
+  options.parallel_mode = mode;
+  options.num_threads = threads;
+  options.batch_size = batch;
+  options.num_playouts = playouts;
+  return options;
+}
+
+int TotalVisits(const std::vector<MoveVisits>& moves) {
+  return std::accumulate(
+      moves.begin(), moves.end(), 0,
+      [](int sum, const MoveVisits& move) { return sum + move.visits; });
+}
+
+constexpr ParallelMode kParallelModes[] = {
+    ParallelMode::kNone, ParallelMode::kVirtualLoss, ParallelMode::kWuPuct};
+
+void SingleWorkerModesAgree() {
+  // With one worker no pre-update is visible during selection, so every
+  // parallel mode must reproduce the same search.
+  FakeEvaluator evaluator;
+  evaluator.evaluate = [](const GamePosition& position) {
+    Evaluation evaluation;
+    for (Action action = 0; action < kActionCount; ++action) {
+      evaluation.policy[action] = 1.f + static_cast<float>(action % 7);
+    }
+    const float sum = std::accumulate(evaluation.policy.begin(),
+                                      evaluation.policy.end(), 0.f);
+    for (float& prior : evaluation.policy) prior /= sum;
+    evaluation.value =
+        static_cast<float>(position.board().stone_count() % 5) / 5.f - 0.4f;
+    return evaluation;
+  };
+
+  std::vector<std::vector<MoveVisits>> results;
+  for (ParallelMode mode : kParallelModes) {
+    MCTS search(ParallelOptions(mode, 1, 1, 300));
+    results.push_back(search.Search(GamePosition(), evaluator));
+  }
+  for (size_t i = 1; i < results.size(); ++i) {
+    CHECK(results[i].size() == results[0].size());
+    for (size_t j = 0; j < results[0].size(); ++j) {
+      CHECK(results[i][j].visits == results[0][j].visits);
+      CHECK(Near(results[i][j].value, results[0][j].value));
+    }
+  }
+}
+
+void ParallelSearchInvariants() {
+  for (ParallelMode mode : kParallelModes) {
+    for (int threads : {2, 4, 8}) {
+      for (int batch : {1, threads}) {
+        BatchRecorder evaluator;
+        MCTS search(ParallelOptions(mode, threads, batch, 200));
+        GamePosition position;
+        for (int move = 0; move < 3; ++move) {
+          const auto moves = search.Search(position, evaluator);
+          CHECK(search.CountInFlight() == 0);
+          // Playouts that stop at an unexpanded root add no child visit.
+          CHECK(TotalVisits(moves) <= (move == 0 ? 200 : 200 + 200));
+          CHECK(TotalVisits(moves) >= 200 - threads);
+          for (const auto& recorded : evaluator.batches) {
+            CHECK(!recorded.empty());
+            CHECK(recorded.size() <= static_cast<size_t>(batch));
+          }
+
+          const auto best = std::max_element(
+              moves.begin(), moves.end(),
+              [](const MoveVisits& a, const MoveVisits& b) {
+                return a.visits < b.visits;
+              });
+          position.PlayMove(best->action);
+          search.ObserveMove(best->action);
+        }
+      }
+    }
+  }
+}
+
+void ParallelSearchSpreadsWorkers() {
+  // Eight workers first collide on the unexpanded root, then fill a second
+  // batch from the expanded root. Without a pre-update they all pick the same
+  // child; virtual loss and WU-PUCT must spread them over distinct children.
+  for (ParallelMode mode : kParallelModes) {
+    SearchOptions options = ParallelOptions(mode, 8, 8, 16);
+    options.batch_timeout_us = SearchOptions::kMaxBatchTimeoutUs;
+    MCTS search(options);
+    BatchRecorder evaluator;
+
+    const auto start = std::chrono::steady_clock::now();
+    search.Search(GamePosition(), evaluator);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    // Flushing once every worker waits avoids sitting out the 1 s timeout.
+    CHECK(elapsed < std::chrono::milliseconds(500));
+    CHECK(search.CountInFlight() == 0);
+
+    CHECK(evaluator.batches.size() >= 2);
+    CHECK(evaluator.batches[0].size() == 8);
+    for (const GamePosition& root : evaluator.batches[0]) {
+      CHECK(root.board().stone_count() == 0);
+    }
+
+    const auto& batch = evaluator.batches[1];
+    CHECK(batch.size() == 8);
+    std::vector<Action> leaves;
+    for (const GamePosition& leaf : batch) leaves.push_back(*leaf.last_move());
+    std::sort(leaves.begin(), leaves.end());
+    const auto distinct = static_cast<size_t>(
+        std::unique(leaves.begin(), leaves.end()) - leaves.begin());
+    CHECK(distinct == (mode == ParallelMode::kNone ? 1u : 8u));
+  }
+}
+
+void ThinkTimeLimit() {
+  BatchRecorder evaluator;
+  evaluator.delay = std::chrono::microseconds(200);
+  SearchOptions options = ParallelOptions(ParallelMode::kWuPuct, 4, 2, 1);
+  options.search_limit = SearchLimit::kThinkTime;
+  options.think_time_ms = 60;
+  MCTS search(options);
+
+  const auto start = std::chrono::steady_clock::now();
+  const auto moves = search.Search(GamePosition(), evaluator);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  CHECK(elapsed >= std::chrono::milliseconds(60));
+  CHECK(elapsed < std::chrono::milliseconds(300));
+  // num_playouts = 1 is ignored in think-time mode.
+  CHECK(TotalVisits(moves) > 10);
+  CHECK(search.CountInFlight() == 0);
+}
+
+void ParallelSearchErrors() {
+  BatchRecorder evaluator;
+  MCTS search(ParallelOptions(ParallelMode::kVirtualLoss, 4, 2, 100));
+  search.Search(GamePosition(), evaluator);
+
+  evaluator.fail = true;
+  CheckThrows<std::runtime_error>(
+      [&] { search.Search(GamePosition(), evaluator); });
+  CHECK(search.CountInFlight() == 0);
+
+  evaluator.fail = false;
+  const auto moves = search.Search(GamePosition(), evaluator);
+  CHECK(TotalVisits(moves) >= 100 - 4);
+  CHECK(search.CountInFlight() == 0);
+}
+
 std::shared_ptr<FakeEvaluator> SamplingEvaluator(const GamePosition& position) {
   const auto actions = position.LegalActions();
   CHECK(actions.size() >= 3);
@@ -1165,6 +1349,11 @@ int main() {
       {"search priors and options", SearchPriorsAndOptions},
       {"search value perspective", SearchValuePerspective},
       {"tree lifecycle and AI", TreeLifecycleAndAI},
+      {"single-worker parallel modes agree", SingleWorkerModesAgree},
+      {"parallel search invariants", ParallelSearchInvariants},
+      {"parallel search spreads workers", ParallelSearchSpreadsWorkers},
+      {"think-time search limit", ThinkTimeLimit},
+      {"parallel search errors", ParallelSearchErrors},
       {"move sampling distribution", MoveSamplingDistribution},
       {"move sampling boundaries and undo", MoveSamplingBoundaries},
       {"move sampling edge cases", MoveSamplingEdgeCases},
