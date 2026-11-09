@@ -490,6 +490,117 @@ void MoveSamplingConfiguration() {
   }
 }
 
+void ParallelSearchConfiguration() {
+  ScopedTempDir temp_dir("test-parallel-config");
+
+  Configuration defaults;
+  for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
+    const SearchOptions& options = defaults.ai_options(player);
+    CHECK(options.search_limit == SearchLimit::kPlayouts);
+    CHECK(options.think_time_ms == 1000);
+    CHECK(options.parallel_mode == ParallelMode::kNone);
+    CHECK(options.virtual_loss == 1.0f);
+    CHECK(options.num_threads == 1);
+    CHECK(options.batch_size == 1);
+    CHECK(options.batch_timeout_us == 1000);
+  }
+
+  SearchOptions first;
+  first.search_limit = SearchLimit::kThinkTime;
+  first.think_time_ms = 2500;
+  first.parallel_mode = ParallelMode::kVirtualLoss;
+  first.virtual_loss = 0.375f;
+  first.num_threads = 8;
+  first.batch_size = 8;
+  first.batch_timeout_us = 250;
+  SearchOptions second;
+  second.parallel_mode = ParallelMode::kWuPuct;
+  second.num_threads = SearchOptions::kMaxThreads;
+  second.batch_size = 4;
+  second.think_time_ms = SearchOptions::kMaxThinkTimeMs;
+  second.batch_timeout_us = SearchOptions::kMaxBatchTimeoutUs;
+
+  defaults.set_ai_options(AIPlayerId::kPlayer1, first);
+  defaults.set_ai_options(AIPlayerId::kPlayer2, second);
+  defaults.Save();
+  {
+    std::ifstream file("gomoku.cfg");
+    const std::string saved{std::istreambuf_iterator<char>(file),
+                            std::istreambuf_iterator<char>()};
+    CHECK(saved.find("ai_player_1_search_limit = think_time\n") !=
+          std::string::npos);
+    CHECK(saved.find("ai_player_1_parallel_mode = virtual_loss\n") !=
+          std::string::npos);
+    CHECK(saved.find("ai_player_2_parallel_mode = wu_puct\n") !=
+          std::string::npos);
+    CHECK(saved.find("ai_player_2_search_limit = playouts\n") !=
+          std::string::npos);
+  }
+
+  Configuration restored;
+  for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
+    const SearchOptions& expected =
+        player == AIPlayerId::kPlayer1 ? first : second;
+    const SearchOptions& actual = restored.ai_options(player);
+    CHECK(actual.search_limit == expected.search_limit);
+    CHECK(actual.think_time_ms == expected.think_time_ms);
+    CHECK(actual.parallel_mode == expected.parallel_mode);
+    CHECK(actual.virtual_loss == expected.virtual_loss);
+    CHECK(actual.num_threads == expected.num_threads);
+    CHECK(actual.batch_size == expected.batch_size);
+    CHECK(actual.batch_timeout_us == expected.batch_timeout_us);
+  }
+
+  // Out-of-range or unknown values fall back to the field default.
+  {
+    std::ofstream file("gomoku.cfg");
+    file << "ai_player_1_parallel_mode = virtual-loss\n"
+         << "ai_player_1_search_limit = time\n"
+         << "ai_player_1_num_threads = 65\n"
+         << "ai_player_1_think_time_ms = 60001\n"
+         << "ai_player_1_batch_timeout_us = 0\n"
+         << "ai_player_1_virtual_loss = 0\n"
+         << "ai_player_2_virtual_loss = nan\n"
+         << "ai_player_2_think_time_ms = 0\n"
+         << "ai_player_2_num_threads = 0\n"
+         << "ai_player_2_batch_size = -1\n";
+  }
+  Configuration invalid;
+  for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
+    const SearchOptions& options = invalid.ai_options(player);
+    CHECK(options.parallel_mode == ParallelMode::kNone);
+    CHECK(options.search_limit == SearchLimit::kPlayouts);
+    CHECK(options.num_threads == 1);
+    CHECK(options.batch_size == 1);
+    CHECK(options.think_time_ms == 1000);
+    CHECK(options.batch_timeout_us == 1000);
+    CHECK(options.virtual_loss == 1.0f);
+  }
+
+  // batch_size <= num_threads is checked after the whole file is read, so
+  // line order does not matter; a violation resets batch_size only.
+  {
+    std::ofstream file("gomoku.cfg");
+    file << "ai_player_1_batch_size = 4\nai_player_1_num_threads = 4\n"
+         << "ai_player_2_num_threads = 2\nai_player_2_batch_size = 3\n";
+  }
+  Configuration ordered;
+  CHECK(ordered.ai_options(AIPlayerId::kPlayer1).num_threads == 4);
+  CHECK(ordered.ai_options(AIPlayerId::kPlayer1).batch_size == 4);
+  CHECK(ordered.ai_options(AIPlayerId::kPlayer2).num_threads == 2);
+  CHECK(ordered.ai_options(AIPlayerId::kPlayer2).batch_size == 1);
+
+  SearchOptions too_large_batch;
+  too_large_batch.num_threads = 2;
+  too_large_batch.batch_size = 3;
+  CHECK(too_large_batch.HasValidFields());
+  CHECK(!too_large_batch.IsValid());
+  CheckThrows<std::invalid_argument>([&] {
+    ordered.set_ai_options(AIPlayerId::kPlayer1, too_large_batch);
+  });
+  CheckThrows<std::invalid_argument>([&] { MCTS search(too_large_batch); });
+}
+
 void SavedGameFiles() {
   ScopedTempDir temp_dir("test-saved-games");
   auto paths = FileManager::ListGameFiles("saves");
@@ -1048,6 +1159,7 @@ int main() {
       {"game modes and human-only timers", GameModesAndTimers},
       {"per-player AI configuration", AIConfiguration},
       {"move sampling configuration", MoveSamplingConfiguration},
+      {"parallel search configuration", ParallelSearchConfiguration},
       {"saved-game discovery", SavedGameFiles},
       {"save/load validation", FileValidation},
       {"search priors and options", SearchPriorsAndOptions},

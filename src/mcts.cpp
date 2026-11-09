@@ -92,10 +92,23 @@ struct MCTS::TreeNode {
 // MCTS
 // ---------------------------------------------------------------------------
 
-bool SearchOptions::IsValid() const {
+bool SearchOptions::HasValidFields() const {
   return std::isfinite(c_puct) && c_puct > 0.0f && num_playouts > 0 &&
          std::isfinite(temperature) && temperature >= 0.0f &&
-         num_sampling_moves >= 0 && num_sampling_moves <= kActionCount;
+         num_sampling_moves >= 0 && num_sampling_moves <= kActionCount &&
+         (search_limit == SearchLimit::kPlayouts ||
+          search_limit == SearchLimit::kThinkTime) &&
+         think_time_ms > 0 && think_time_ms <= kMaxThinkTimeMs &&
+         (parallel_mode == ParallelMode::kNone ||
+          parallel_mode == ParallelMode::kVirtualLoss ||
+          parallel_mode == ParallelMode::kWuPuct) &&
+         std::isfinite(virtual_loss) && virtual_loss > 0.0f &&
+         num_threads > 0 && num_threads <= kMaxThreads && batch_size > 0 &&
+         batch_timeout_us > 0 && batch_timeout_us <= kMaxBatchTimeoutUs;
+}
+
+bool SearchOptions::IsValid() const {
+  return HasValidFields() && batch_size <= num_threads;
 }
 
 MCTS::MCTS(SearchOptions options) : options_(options) {

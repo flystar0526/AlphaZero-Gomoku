@@ -21,16 +21,48 @@ constexpr std::string_view ConfigPrefix(AIPlayerId player) {
   return player == AIPlayerId::kPlayer1 ? "ai_player_1_" : "ai_player_2_";
 }
 
-// Visits each SearchOptions field with its config key name.
+// Visits each SearchOptions field with its config key name. num_threads is
+// written before batch_size so saved files satisfy batch_size <= num_threads
+// in reading order.
 template <typename Visitor>
 void ForEachSearchOption(Visitor&& visit) {
   visit("num_playouts", &SearchOptions::num_playouts);
   visit("c_puct", &SearchOptions::c_puct);
   visit("temperature", &SearchOptions::temperature);
   visit("num_sampling_moves", &SearchOptions::num_sampling_moves);
+  visit("search_limit", &SearchOptions::search_limit);
+  visit("think_time_ms", &SearchOptions::think_time_ms);
+  visit("parallel_mode", &SearchOptions::parallel_mode);
+  visit("virtual_loss", &SearchOptions::virtual_loss);
+  visit("num_threads", &SearchOptions::num_threads);
+  visit("batch_size", &SearchOptions::batch_size);
+  visit("batch_timeout_us", &SearchOptions::batch_timeout_us);
 }
 
-std::optional<int> ParseNumber(const std::string& text, int*) {
+// Config names for enum options, indexed by enum value.
+constexpr std::string_view kSearchLimitNames[] = {"playouts", "think_time"};
+constexpr std::string_view kParallelModeNames[] = {"none", "virtual_loss",
+                                                   "wu_puct"};
+
+template <typename Enum, size_t N>
+std::optional<Enum> ParseEnum(const std::string& text,
+                              const std::string_view (&names)[N]) {
+  for (size_t i = 0; i < N; ++i) {
+    if (names[i] == text) return static_cast<Enum>(i);
+  }
+  return std::nullopt;
+}
+
+std::optional<SearchLimit> ParseValue(const std::string& text, SearchLimit*) {
+  return ParseEnum<SearchLimit>(text, kSearchLimitNames);
+}
+
+std::optional<ParallelMode> ParseValue(const std::string& text,
+                                       ParallelMode*) {
+  return ParseEnum<ParallelMode>(text, kParallelModeNames);
+}
+
+std::optional<int> ParseValue(const std::string& text, int*) {
   try {
     size_t parsed = 0;
     const int value = std::stoi(text, &parsed);
@@ -40,7 +72,7 @@ std::optional<int> ParseNumber(const std::string& text, int*) {
   return std::nullopt;
 }
 
-std::optional<float> ParseNumber(const std::string& text, float*) {
+std::optional<float> ParseValue(const std::string& text, float*) {
   char* end = nullptr;
   errno = 0;
   const float value = std::strtof(text.c_str(), &end);
@@ -51,15 +83,24 @@ std::optional<float> ParseNumber(const std::string& text, float*) {
   return std::nullopt;
 }
 
+void WriteValue(std::ostream& out, int value) { out << value; }
+void WriteValue(std::ostream& out, float value) { out << value; }
+void WriteValue(std::ostream& out, SearchLimit value) {
+  out << kSearchLimitNames[static_cast<size_t>(value)];
+}
+void WriteValue(std::ostream& out, ParallelMode value) {
+  out << kParallelModeNames[static_cast<size_t>(value)];
+}
+
 // Parses a single AI search option, falling back to default if invalid.
 void ParseSearchOption(std::string_view name, const std::string& text,
                        SearchOptions& options) {
   ForEachSearchOption([&](std::string_view option_name, auto member) {
     if (option_name != name) return;
     auto& field = options.*member;
-    const auto value = ParseNumber(text, &field);
+    const auto value = ParseValue(text, &field);
     field = value ? *value : SearchOptions{}.*member;
-    if (!options.IsValid()) field = SearchOptions{}.*member;
+    if (!options.HasValidFields()) field = SearchOptions{}.*member;
   });
 }
 
@@ -77,7 +118,9 @@ void WriteAIOptions(std::ostream& out, AIPlayerId player,
   out.precision(std::numeric_limits<float>::max_digits10);
 
   ForEachSearchOption([&](std::string_view name, auto member) {
-    out << ConfigPrefix(player) << name << " = " << options.*member << '\n';
+    out << ConfigPrefix(player) << name << " = ";
+    WriteValue(out, options.*member);
+    out << '\n';
   });
 
   out.flags(flags);
@@ -112,6 +155,12 @@ Configuration::Configuration() {
                           ai_options_[static_cast<size_t>(player)]);
       }
     }
+  }
+
+  // Fields are checked one at a time while reading; resolve the cross-field
+  // batch_size <= num_threads constraint once every line has been read.
+  for (SearchOptions& options : ai_options_) {
+    if (!options.IsValid()) options.batch_size = SearchOptions{}.batch_size;
   }
 }
 

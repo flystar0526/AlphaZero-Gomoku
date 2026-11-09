@@ -6,13 +6,41 @@
 #include "game_position.h"
 #include "policy_value_network.h"
 
+// Strategy that steers concurrent search workers onto different paths.
+enum class ParallelMode {
+  kNone,         // No pre-update; workers read only completed statistics.
+  kVirtualLoss,  // N += virtual_loss, W -= virtual_loss on in-flight edges.
+  kWuPuct,       // Counts in-flight simulations O in the exploration term.
+};
+
+// Budget that ends a search.
+enum class SearchLimit {
+  kPlayouts,   // Stop after `num_playouts` simulations.
+  kThinkTime,  // Stop dispatching simulations after `think_time_ms`.
+};
+
 // Hyperparameters for MCTS search and move sampling.
 struct SearchOptions {
+  static constexpr int kMaxThreads = 64;
+  static constexpr int kMaxBatchTimeoutUs = 1'000'000;
+  static constexpr int kMaxThinkTimeMs = 60'000;
+
   float c_puct = 5.0f;
   int num_playouts = 400;
   float temperature = 1.0f;
   int num_sampling_moves = 30;
+  SearchLimit search_limit = SearchLimit::kPlayouts;
+  int think_time_ms = 1000;
+  ParallelMode parallel_mode = ParallelMode::kNone;
+  float virtual_loss = 1.0f;
+  int num_threads = 1;
+  int batch_size = 1;
+  int batch_timeout_us = 1000;
 
+  // Checks each field's own range, ignoring cross-field constraints.
+  bool HasValidFields() const;
+
+  // Checks every field and requires batch_size <= num_threads.
   bool IsValid() const;
 };
 
