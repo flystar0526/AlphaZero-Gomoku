@@ -11,14 +11,17 @@
 
 #include "key_value.h"
 
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
 namespace {
 
 constexpr std::string_view ConfigPrefix(AIPlayerId player) {
   return player == AIPlayerId::kPlayer1 ? "ai_player_1_" : "ai_player_2_";
 }
 
-// Visits each SearchOptions field with its config key suffix. This is the only
-// list of AI option names; parsing and writing both use it.
+// Visits each SearchOptions field with its config key name.
 template <typename Visitor>
 void ForEachSearchOption(Visitor&& visit) {
   visit("num_playouts", &SearchOptions::num_playouts);
@@ -48,8 +51,7 @@ std::optional<float> ParseNumber(const std::string& text, float*) {
   return std::nullopt;
 }
 
-// Sets the option named `name` from `text`. Unparsable or invalid values fall
-// back to the field's default. Unknown names are ignored.
+// Parses a single AI search option, falling back to default if invalid.
 void ParseSearchOption(std::string_view name, const std::string& text,
                        SearchOptions& options) {
   ForEachSearchOption([&](std::string_view option_name, auto member) {
@@ -63,15 +65,21 @@ void ParseSearchOption(std::string_view name, const std::string& text,
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
 void WriteAIOptions(std::ostream& out, AIPlayerId player,
                     const SearchOptions& options) {
   const std::ios_base::fmtflags flags = out.flags();
   const std::streamsize precision = out.precision();
   out.unsetf(std::ios_base::floatfield);
   out.precision(std::numeric_limits<float>::max_digits10);
+
   ForEachSearchOption([&](std::string_view name, auto member) {
     out << ConfigPrefix(player) << name << " = " << options.*member << '\n';
   });
+
   out.flags(flags);
   out.precision(precision);
 }
@@ -83,8 +91,10 @@ Configuration::Configuration() {
   std::string line;
   while (std::getline(file, line)) {
     if (line.empty() || line[0] == '#') continue;
+
     std::string key, val;
     if (!SplitKeyValue(line, key, val)) continue;
+
     if (key == "undo_enabled") {
       undo_enabled_ = (val == "true");
     } else if (key == "time_limit_enabled") {
@@ -108,29 +118,38 @@ Configuration::Configuration() {
 void Configuration::Save() const {
   std::ofstream file(kConfigPath);
   if (!file.is_open()) return;
+
   file << "# Gomoku configuration\n";
   file << "undo_enabled = " << (undo_enabled_ ? "true" : "false") << "\n";
   file << "time_limit_enabled = " << (time_limit_enabled_ ? "true" : "false")
        << "\n";
   file << "time_limit_seconds = " << time_limit_seconds_ << "\n";
+
   for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
     WriteAIOptions(file, player, ai_options(player));
   }
 }
 
 bool Configuration::undo_enabled() const { return undo_enabled_; }
+
 bool Configuration::time_limit_enabled() const { return time_limit_enabled_; }
+
 int Configuration::time_limit_seconds() const { return time_limit_seconds_; }
+
 const SearchOptions& Configuration::ai_options(AIPlayerId player) const {
   return ai_options_[static_cast<size_t>(player)];
 }
+
 void Configuration::set_undo_enabled(bool value) { undo_enabled_ = value; }
+
 void Configuration::set_time_limit_enabled(bool value) {
   time_limit_enabled_ = value;
 }
+
 void Configuration::set_time_limit_seconds(int seconds) {
   time_limit_seconds_ = seconds;
 }
+
 void Configuration::set_ai_options(AIPlayerId player, SearchOptions options) {
   if (!options.IsValid()) {
     throw std::invalid_argument(

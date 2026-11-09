@@ -49,7 +49,6 @@ float Game::GetSecondsRemaining() const {
 }
 
 bool Game::TryPlaceStone(Action action) {
-  // Re-check the timer so expired turns cannot slip a move in between frames.
   Update();
   if (state_ != State::kPlaying || !position_.IsLegalMove(action)) return false;
 
@@ -73,15 +72,13 @@ bool Game::TryPlaceStone(Action action) {
 
 void Game::Undo() {
   if (state_ != State::kPlaying || mode_ == Mode::kAIvsAI ||
-      !config_.undo_enabled() ||
-      record_.size() < 2) {
+      !config_.undo_enabled() || record_.size() < 2) {
     return;
   }
 
   record_.RemoveLastMove();
   record_.RemoveLastMove();
 
-  // Rebuild from history to keep last-move and turn state consistent.
   std::optional<GamePosition> restored =
       GamePosition::Rebuild(record_.moves(), record_.size());
   assert(restored.has_value());

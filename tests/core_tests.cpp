@@ -28,6 +28,10 @@ namespace {
 using test::CheckThrows;
 using test::DrawMoves;
 
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
 bool Near(float a, float b) { return std::abs(a - b) < 1e-5f; }
 
 class FakeEvaluator : public PolicyValueEvaluator {
@@ -56,13 +60,42 @@ GamePosition PositionBeforeWin(Player player) {
   return position;
 }
 
+struct ScopedTempDir {
+  std::filesystem::path original;
+  std::filesystem::path directory;
+
+  explicit ScopedTempDir(const std::string& prefix)
+      : original(std::filesystem::current_path()),
+        directory(original /
+                  (prefix + "-" +
+                   std::to_string(std::chrono::steady_clock::now()
+                                      .time_since_epoch()
+                                      .count()))) {
+    std::filesystem::create_directories(directory);
+    std::filesystem::current_path(directory);
+  }
+
+  ~ScopedTempDir() {
+    std::filesystem::current_path(original);
+    std::error_code ec;
+    std::filesystem::remove_all(directory, ec);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Board and position rules
+// ---------------------------------------------------------------------------
+
 void BoardRules() {
   Board board;
   CHECK(board.stone_count() == 0);
   CHECK(board.LegalActions().size() == kActionCount);
+
   for (const auto& cell : std::vector<std::pair<int, int>>{
-           {-1, 0}, {0, -1}, {kBoardSize, 0}, {0, kBoardSize}})
+           {-1, 0}, {0, -1}, {kBoardSize, 0}, {0, kBoardSize}}) {
     CHECK(!IsValidCell(cell.first, cell.second));
+  }
+
   CHECK(!board.IsLegalMove(-1));
   CHECK(!board.IsLegalMove(kActionCount));
   board.PlaceStone(ToAction(0, 1), Player::kBlack);
@@ -82,16 +115,18 @@ void BoardRules() {
       CHECK(board.CheckWin(action, Player::kWhite) == (i >= 4));
       CHECK(!board.CheckWin(action, Player::kBlack));
     }
-    // An empty origin must never count as a fifth stone.
     CHECK(!board.CheckWin(
         ToAction(6 * direction[0], start_col + 6 * direction[1]),
         Player::kWhite));
   }
+
   board.Reset();
-  for (Action action = 0; action < kActionCount; ++action)
+  for (Action action = 0; action < kActionCount; ++action) {
     board.PlaceStone(action, Player::kBlack);
+  }
   CHECK(board.IsFull());
   CHECK(board.LegalActions().empty());
+
   board.Reset();
   CHECK(!board.IsFull());
   CHECK(board.stone_count() == 0);
@@ -102,13 +137,16 @@ void PositionRules() {
   CHECK(position.current_player() == Player::kBlack);
   CHECK(!position.last_move());
   CHECK(!position.is_terminal());
+
   position.PlayMove(ToAction(0, 1));
   CHECK(position.current_player() == Player::kWhite);
   CHECK(position.last_move() == ToAction(0, 1));
   CHECK(!position.IsLegalMove(ToAction(0, 1)));
+
   auto copy = position;
   copy.PlayMove(ToAction(14, 12));
   CHECK(position.board().GetCell(ToAction(14, 12)) == Cell::kEmpty);
+
   for (Player player : {Player::kBlack, Player::kWhite}) {
     auto win = PositionBeforeWin(player);
     win.PlayMove(ToAction(7, 4));
@@ -118,6 +156,7 @@ void PositionRules() {
     CHECK(win.LegalActions().empty());
     CHECK(!win.IsLegalMove(ToAction(10, 10)));
   }
+
   GamePosition draw;
   for (Action action : DrawMoves()) {
     CHECK(!draw.is_terminal());
@@ -130,8 +169,9 @@ void PositionRules() {
 void FeatureContract() {
   GamePosition position;
   auto features = PolicyValueNetwork::EncodeFeatures(position);
-  CHECK(std::all_of(features.begin(), features.end(), [](float x) { return x == 0.f; }));
-  // Asymmetric corners catch vertical flips, transposes and policy remapping.
+  CHECK(std::all_of(features.begin(), features.end(),
+                    [](float x) { return x == 0.f; }));
+
   position.PlayMove(ToAction(0, 1));
   PolicyValueNetwork::Features expected{};
   expected[kActionCount + ToAction(0, 1)] = 1.f;
@@ -154,10 +194,15 @@ void FeatureContract() {
   CHECK(PolicyValueNetwork::EncodeFeatures(position) == expected);
 }
 
+// ---------------------------------------------------------------------------
+// Game flow, modes, and timers
+// ---------------------------------------------------------------------------
+
 void GameUndoAndReplay() {
   Configuration config;
   config.set_undo_enabled(true);
   config.set_time_limit_enabled(false);
+
   Game game(config);
   game.Start();
   CHECK(!game.TryPlaceStone(-1));
@@ -166,9 +211,11 @@ void GameUndoAndReplay() {
   CHECK(game.TryPlaceStone(ToAction(0, 1)));
   CHECK(!game.TryPlaceStone(ToAction(0, 1)));
   CHECK(game.TryPlaceStone(ToAction(14, 12)));
+
   const auto before = PolicyValueNetwork::EncodeFeatures(game.position());
   CHECK(game.TryPlaceStone(ToAction(4, 6)));
   CHECK(game.TryPlaceStone(ToAction(9, 8)));
+
   game.Undo();
   CHECK(PolicyValueNetwork::EncodeFeatures(game.position()) == before);
   CHECK(game.current_player() == Player::kBlack);
@@ -176,9 +223,11 @@ void GameUndoAndReplay() {
   CHECK(game.record().size() == 2);
   CHECK(game.position().last_move() == ToAction(14, 12));
   CHECK(GamePosition::Rebuild(game.record().moves(), 2).has_value());
+
   game.Undo();
   CHECK(!game.position().last_move());
   CHECK(game.next_move_number() == 1);
+
   game.Undo();
   CHECK(game.board().stone_count() == 0);
 
@@ -190,10 +239,13 @@ void GameUndoAndReplay() {
   CHECK(game.state() == Game::State::kWin);
   CHECK(game.winner() == Player::kBlack);
   CHECK(!game.TryPlaceStone(ToAction(10, 10)));
+
   auto moves = game.record().moves();
-  CHECK(GamePosition::Rebuild(moves, static_cast<int>(moves.size()))->winner() == Player::kBlack);
+  CHECK(GamePosition::Rebuild(moves, static_cast<int>(moves.size()))->winner() ==
+        Player::kBlack);
   moves.push_back({10, Player::kWhite, 10, 10});
   CHECK(!GamePosition::Rebuild(moves, static_cast<int>(moves.size())));
+
   moves = game.record().moves();
   moves[0].player = Player::kWhite;
   CHECK(!GamePosition::Rebuild(moves, 1));
@@ -201,9 +253,8 @@ void GameUndoAndReplay() {
   CHECK(!GamePosition::Rebuild(moves, 1));
   CHECK(!GamePosition::Rebuild(moves, -1));
 
-  // Verify Forfeit transitions state and assigns the opponent as winner.
   game.Start();
-  CHECK(game.TryPlaceStone(ToAction(7, 7)));  // Black plays; now White's turn.
+  CHECK(game.TryPlaceStone(ToAction(7, 7)));
   game.Forfeit();
   CHECK(game.state() == Game::State::kForfeit);
   CHECK(game.winner() == Player::kBlack);
@@ -212,6 +263,7 @@ void GameUndoAndReplay() {
   game.Start();
   CHECK(!game.position().last_move());
   CHECK(!game.winner());
+
   config.set_time_limit_enabled(true);
   config.set_time_limit_seconds(0);
   Game timeout_game(config);
@@ -221,7 +273,6 @@ void GameUndoAndReplay() {
   CHECK(timeout_game.board().stone_count() == 0);
 }
 
-// Verifies role queries, human-only timers, and mode-specific undo/metadata.
 void GameModesAndTimers() {
   Configuration config;
   config.set_time_limit_enabled(true);
@@ -245,7 +296,7 @@ void GameModesAndTimers() {
   CHECK(mixed.GetSecondsRemaining() > 0.0f);
   CHECK(mixed.TryPlaceStone(ToAction(7, 7)));
   CHECK(mixed.GetSecondsRemaining() == -1.0f);
-  mixed.Update();  // Disabled timer sentinel on AI turns must not time out.
+  mixed.Update();
   CHECK(mixed.state() == Game::State::kPlaying);
   CHECK(mixed.TryPlaceStone(ToAction(7, 8)));
   CHECK(mixed.GetSecondsRemaining() > 59.0f);
@@ -266,6 +317,7 @@ void GameModesAndTimers() {
   CHECK(self_play.IsAIPlayer(Player::kWhite));
   CHECK((DefaultSeats(Game::Mode::kAIvsAI) ==
          Seats{AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}));
+
   for (int col = 0; col < 4; ++col) {
     CHECK(self_play.GetSecondsRemaining() == -1.0f);
     self_play.Update();
@@ -273,44 +325,28 @@ void GameModesAndTimers() {
     CHECK(self_play.TryPlaceStone(ToAction(7, col)));
     CHECK(self_play.TryPlaceStone(ToAction(0, col)));
   }
-  self_play.Undo();  // Undo is disabled in AI vs AI.
+
+  self_play.Undo();
   CHECK(self_play.record().size() == 8);
   CHECK(self_play.TryPlaceStone(ToAction(7, 4)));
   CHECK(self_play.state() == Game::State::kWin);
+
   const auto record = self_play.FinalizeRecord();
   CHECK(!record.metadata().time_limit_enabled);
   CHECK(!record.metadata().undo_enabled);
   CHECK(config.time_limit_enabled());
   CHECK(config.undo_enabled());
+
   self_play.Start();
   CHECK(self_play.mode() == Game::Mode::kAIvsAI);
   CHECK(self_play.GetSecondsRemaining() == -1.0f);
   CHECK(self_play.record().size() == 0);
 }
 
-struct ScopedTempDir {
-  std::filesystem::path original;
-  std::filesystem::path directory;
+// ---------------------------------------------------------------------------
+// Configuration and file persistence
+// ---------------------------------------------------------------------------
 
-  explicit ScopedTempDir(const std::string& prefix)
-      : original(std::filesystem::current_path()),
-        directory(original /
-                  (prefix + "-" +
-                   std::to_string(std::chrono::steady_clock::now()
-                                      .time_since_epoch()
-                                      .count()))) {
-    std::filesystem::create_directories(directory);
-    std::filesystem::current_path(directory);
-  }
-
-  ~ScopedTempDir() {
-    std::filesystem::current_path(original);
-    std::error_code ec;
-    std::filesystem::remove_all(directory, ec);
-  }
-};
-
-// Verifies loading, saving, and validation of per-player AI search options.
 void AIConfiguration() {
   ScopedTempDir temp_dir("test-ai-config");
 
@@ -321,11 +357,13 @@ void AIConfiguration() {
     CHECK(defaults.ai_options(player).temperature == 1.0f);
     CHECK(defaults.ai_options(player).num_sampling_moves == 30);
   }
+
   {
     std::ofstream("gomoku.cfg")
         << "undo_enabled = true\ntime_limit_seconds = 30\n"
         << "black_ai_num_playouts = 17\nwhite_ai_c_puct = 2.5\n";
   }
+
   Configuration partial;
   CHECK(partial.undo_enabled());
   CHECK(partial.time_limit_seconds() == 30);
@@ -340,6 +378,7 @@ void AIConfiguration() {
   partial.set_ai_options(AIPlayerId::kPlayer2,
                          {8.7654321f, 19, 2.5f, kActionCount});
   partial.Save();
+
   {
     std::ifstream file("gomoku.cfg");
     const std::string saved{std::istreambuf_iterator<char>(file),
@@ -349,6 +388,7 @@ void AIConfiguration() {
     CHECK(saved.find("black_ai_") == std::string::npos);
     CHECK(saved.find("white_ai_") == std::string::npos);
   }
+
   Configuration restored;
   for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
     CHECK(restored.ai_options(player).num_playouts ==
@@ -400,7 +440,6 @@ void AIConfiguration() {
   }
 }
 
-// Verifies parsing and boundary validation of move sampling configuration.
 void MoveSamplingConfiguration() {
   ScopedTempDir temp_dir("test-sampling-config");
 
@@ -421,12 +460,14 @@ void MoveSamplingConfiguration() {
     CHECK(config.ai_options(AIPlayerId::kPlayer2).temperature == 2.0f);
     CHECK(config.ai_options(AIPlayerId::kPlayer2).num_sampling_moves == 30);
   }
+
   {
     std::ofstream file("gomoku.cfg");
     file << "ai_player_1_temperature = 0\nai_player_1_num_sampling_moves = 0\n"
          << "ai_player_2_temperature = 226\n"
          << "ai_player_2_num_sampling_moves = 226\n";
   }
+
   Configuration config;
   CHECK(config.ai_options(AIPlayerId::kPlayer1).IsValid());
   CHECK(config.ai_options(AIPlayerId::kPlayer1).temperature == 0.0f);
@@ -434,9 +475,11 @@ void MoveSamplingConfiguration() {
   CHECK(config.ai_options(AIPlayerId::kPlayer2).temperature == 226.0f);
   CHECK(config.ai_options(AIPlayerId::kPlayer2).num_sampling_moves == 30);
   config.Save();
+
   Configuration restored;
   CHECK(restored.ai_options(AIPlayerId::kPlayer1).temperature == 0.0f);
   CHECK(restored.ai_options(AIPlayerId::kPlayer1).num_sampling_moves == 0);
+
   for (float temperature :
        {std::numeric_limits<float>::denorm_min(),
         std::numeric_limits<float>::min(), std::numeric_limits<float>::max()}) {
@@ -447,7 +490,6 @@ void MoveSamplingConfiguration() {
   }
 }
 
-// Verifies saved-game file discovery.
 void SavedGameFiles() {
   ScopedTempDir temp_dir("test-saved-games");
   auto paths = FileManager::ListGameFiles("saves");
@@ -462,6 +504,7 @@ void SavedGameFiles() {
   GameMetadata metadata;
   metadata.total_moves = 1;
   record.Finalize(metadata);
+
   CHECK(FileManager::Save(record, "saves/b.gom"));
   CHECK(FileManager::Save(record, "saves/a game.gom"));
   std::ofstream("saves/notes.txt");
@@ -472,6 +515,7 @@ void SavedGameFiles() {
   paths = FileManager::ListGameFiles("saves");
   CHECK(paths ==
         std::vector<std::string>({"saves/a game.gom", "saves/b.gom"}));
+
   ReplayController replay;
   for (const auto& path : *paths) {
     CHECK(replay.Load(path));
@@ -490,12 +534,15 @@ void SavedGameFiles() {
 }
 
 void FileValidation() {
-  // CTest runs this executable in the build directory, keeping test files local.
   const auto path = std::filesystem::current_path() / "test-record.gom";
   struct Cleanup {
     std::filesystem::path path;
-    ~Cleanup() { std::error_code ec; std::filesystem::remove(path, ec); }
+    ~Cleanup() {
+      std::error_code ec;
+      std::filesystem::remove(path, ec);
+    }
   } cleanup{path};
+
   GameRecord record;
   record.AddMove({1, Player::kBlack, 0, 1});
   record.AddMove({2, Player::kWhite, 14, 12});
@@ -503,17 +550,21 @@ void FileValidation() {
   metadata.total_moves = 2;
   record.Finalize(metadata);
   CHECK(FileManager::Save(record, path.string()));
+
   ReplayController replay;
   CHECK(replay.Load(path.string()));
   CHECK(replay.step() == 0);
   CHECK(replay.position().board().stone_count() == 0);
   CHECK(!replay.position().last_move().has_value());
+
   replay.Seek(1);
   CHECK(replay.position().board().GetCell(ToAction(0, 1)) == Cell::kBlack);
   CHECK(replay.position().last_move() == ToAction(0, 1));
+
   replay.Seek(2);
   CHECK(replay.position().board().GetCell(ToAction(14, 12)) == Cell::kWhite);
   CHECK(replay.position().last_move() == ToAction(14, 12));
+
   replay.Seek(99);
   CHECK(replay.step() == 2 && replay.position().board().stone_count() == 2);
   replay.Seek(-1);
@@ -530,8 +581,9 @@ void FileValidation() {
     bad.Finalize(metadata);
     CHECK(FileManager::Save(bad, path.string()));
     CHECK(!replay.Load(path.string()));
-    CHECK(replay.total_moves() == 2);  // A failed load preserves the old replay.
+    CHECK(replay.total_moves() == 2);
   }
+
   {
     std::ofstream file(path);
     file << "[metadata]\ntotal_moves = invalid\n[moves]\n";
@@ -539,19 +591,26 @@ void FileValidation() {
   CHECK(!replay.Load(path.string()));
 }
 
+// ---------------------------------------------------------------------------
+// MCTS and AI move selection
+// ---------------------------------------------------------------------------
+
 void SearchPriorsAndOptions() {
   for (const auto& options : std::vector<SearchOptions>{
            {0.f, 1}, {-1.f, 1}, {5.f, 0}, {5.f, -1},
-           {std::numeric_limits<float>::infinity(), 1}})
+           {std::numeric_limits<float>::infinity(), 1}}) {
     CheckThrows<std::invalid_argument>([&] { MCTS search(options); });
+  }
 
   GamePosition position;
   position.PlayMove(0);
+
   FakeEvaluator evaluator;
   evaluator.output.policy.fill(0.f);
-  evaluator.output.policy[0] = 0.99f;  // Occupied probability must be discarded.
+  evaluator.output.policy[0] = 0.99f;
   evaluator.output.policy[1] = 0.002f;
   evaluator.output.policy[2] = 0.008f;
+
   MCTS search({5.f, 1});
   auto moves = search.Search(position, evaluator);
   CHECK(moves.size() == kActionCount - 1);
@@ -559,56 +618,61 @@ void SearchPriorsAndOptions() {
   CHECK(Near(moves[0].prior, 0.2f));
   CHECK(Near(moves[1].prior, 0.8f));
   CHECK(Near(std::accumulate(moves.begin(), moves.end(), 0.f,
-      [](float sum, const MoveVisits& move) { return sum + move.prior; }), 1.f));
+                             [](float sum, const MoveVisits& move) {
+                               return sum + move.prior;
+                             }),
+             1.f));
 
   search.Reset();
   evaluator.output.policy.fill(0.f);
-  evaluator.output.policy[0] = 1.f;  // All legal moves have zero probability.
+  evaluator.output.policy[0] = 1.f;
   moves = search.Search(position, evaluator);
   for (const auto& move : moves) CHECK(Near(move.prior, 1.f / 224));
 }
 
 void SearchValuePerspective() {
-  // A terminal winning child must be +1 for the player choosing that move.
   for (Player player : {Player::kBlack, Player::kWhite}) {
     auto position = PositionBeforeWin(player);
     FakeEvaluator evaluator;
     evaluator.output.policy.fill(0.f);
     evaluator.output.policy[ToAction(7, 4)] = 1.f;
+
     MCTS search({5.f, 2});
     auto moves = search.Search(position, evaluator);
-    auto win = std::find_if(moves.begin(), moves.end(), [](const MoveVisits& move) {
-      return move.action == ToAction(7, 4);
-    });
+    auto win = std::find_if(
+        moves.begin(), moves.end(),
+        [](const MoveVisits& move) { return move.action == ToAction(7, 4); });
     CHECK(win != moves.end());
     CHECK(win->visits == 1);
     CHECK(Near(win->value, 1.f));
     CHECK(evaluator.calls == 1);
+
     position.PlayMove(ToAction(7, 4));
     CHECK(search.Search(position, evaluator).empty());
     CHECK(evaluator.calls == 1);
   }
 
-  // The child's predicted advantage is a disadvantage for the parent player.
   FakeEvaluator evaluator;
   evaluator.output.policy.fill(0.f);
   evaluator.output.policy[17] = 1.f;
   evaluator.output.value = 0.75f;
+
   MCTS search({5.f, 2});
   auto moves = search.Search(GamePosition(), evaluator);
   CHECK(Near(moves[17].value, -0.75f));
 
-  // A full-board draw does not invoke the model or give either player a win.
   GamePosition draw;
   const auto actions = DrawMoves();
   for (size_t i = 0; i + 1 < actions.size(); ++i) draw.PlayMove(actions[i]);
   evaluator.calls = 0;
   evaluator.output.policy.fill(1.f);
+
   search.Reset();
   moves = search.Search(draw, evaluator);
   CHECK(moves.size() == 1);
   CHECK(Near(moves[0].value, 0.f));
   CHECK(evaluator.calls == 1);
+
   draw.PlayMove(actions.back());
   CHECK(search.Search(draw, evaluator).empty());
 }
@@ -619,19 +683,23 @@ void TreeLifecycleAndAI() {
   fake->output.policy.fill(0.f);
   fake->output.policy[19] = 0.8f;
   fake->output.policy[20] = 0.2f;
+
   AIPlayer player(std::move(evaluator), {5.f, 1});
   GamePosition position;
-  CHECK(player.PickMove(position) == 19);  // Prior breaks the zero-visit tie.
-  CHECK(player.PickMove(position) == 19);  // Selection did not commit a move.
+  CHECK(player.PickMove(position) == 19);
+  CHECK(player.PickMove(position) == 19);
   CHECK(position.board().stone_count() == 0);
+
   position.PlayMove(19);
   player.ObserveMove(19);
   auto next = player.PickMove(position);
   CHECK(next.has_value());
   CHECK(position.IsLegalMove(*next));
+
   position.PlayMove(*next);
   player.ObserveMove(*next);
   CHECK(player.PickMove(position).has_value());
+
   player.Reset();
   CHECK(player.PickMove(GamePosition()) == 19);
 
@@ -641,8 +709,6 @@ void TreeLifecycleAndAI() {
   CHECK(!player.PickMove(terminal));
   CHECK(fake->calls == calls);
 
-  // Reusing an already-expanded child avoids evaluating it as a fresh root
-  // and keeps grandchild->parent pointers valid after moving the new root.
   MCTS search({5.f, 3});
   FakeEvaluator reuse;
   reuse.output.policy.fill(0.f);
@@ -650,6 +716,7 @@ void TreeLifecycleAndAI() {
   reuse.output.policy[1] = 0.5f;
   auto stats = search.Search(GamePosition(), reuse);
   CHECK(stats[0].visits == 2);
+
   search.ObserveMove(0);
   GamePosition after;
   after.PlayMove(0);
@@ -657,27 +724,27 @@ void TreeLifecycleAndAI() {
   stats = search.Search(after, reuse);
   CHECK(reuse.calls == previous_calls + 3);
   CHECK(std::accumulate(stats.begin(), stats.end(), 0,
-      [](int sum, const MoveVisits& move) { return sum + move.visits; }) == 4);
+                        [](int sum, const MoveVisits& move) {
+                          return sum + move.visits;
+                        }) == 4);
+
   search.Reset();
   stats = search.Search(GamePosition(), reuse);
   CHECK(stats[0].visits == 2);
 
-  // The existing single background job must transfer exceptions to its caller.
   auto throwing = std::make_unique<FakeEvaluator>();
   throwing->evaluate = [](const GamePosition&) -> Evaluation {
     throw std::runtime_error("model failed");
   };
   AIPlayer failing(std::move(throwing), {5.f, 1});
-  auto result = std::async(std::launch::async, [&] {
-    return failing.PickMove(GamePosition());
-  });
+  auto result = std::async(std::launch::async,
+                           [&] { return failing.PickMove(GamePosition()); });
   CheckThrows<std::runtime_error>([&] { result.get(); });
   CHECK(!result.valid());
   failing.Reset();
   CheckThrows<std::invalid_argument>([] { AIPlayer no_model(nullptr); });
 }
 
-// These priors yield root visits [6, 3, 1] after 11 simulations at value zero.
 std::shared_ptr<FakeEvaluator> SamplingEvaluator(const GamePosition& position) {
   const auto actions = position.LegalActions();
   CHECK(actions.size() >= 3);
@@ -689,14 +756,15 @@ std::shared_ptr<FakeEvaluator> SamplingEvaluator(const GamePosition& position) {
   return evaluator;
 }
 
-// Verifies that move sampling matches the temperature-weighted visit distribution.
 void MoveSamplingDistribution() {
   GamePosition position;
   const auto draw_moves = DrawMoves();
   for (int i = 0; i < kActionCount - 3; ++i) position.PlayMove(draw_moves[i]);
+
   const auto actions = position.LegalActions();
   auto evaluator = SamplingEvaluator(position);
   const std::array<int, 3> visits = {6, 3, 1};
+
   MCTS reference({5.0f, 11});
   const auto candidates = reference.Search(position, *evaluator);
   CHECK(candidates.size() == visits.size());
@@ -711,6 +779,7 @@ void MoveSamplingDistribution() {
     AIPlayer player(evaluator, options, 12345);
     AIPlayer identical(evaluator, options, 12345);
     std::array<int, 3> counts{};
+
     for (int i = 0; i < kSamples; ++i) {
       player.Reset();
       identical.Reset();
@@ -721,6 +790,7 @@ void MoveSamplingDistribution() {
       CHECK(found != actions.end());
       ++counts[static_cast<size_t>(found - actions.begin())];
     }
+
     double total_weight = 0.0;
     for (int count : visits) {
       total_weight += std::pow(count, 1.0 / temperature);
@@ -734,10 +804,10 @@ void MoveSamplingDistribution() {
   }
 }
 
-// Verifies sampling move count limits, undo restoration, and disabling options.
 void MoveSamplingBoundaries() {
   auto evaluator = SamplingEvaluator(GamePosition());
   AIPlayer player(evaluator, {5.0f, 11, 1.0f, 4}, 12345);
+
   const auto count_alternatives = [&](const GamePosition& position,
                                       AIPlayer& ai) {
     evaluator->output = SamplingEvaluator(position)->output;
@@ -758,9 +828,13 @@ void MoveSamplingBoundaries() {
   config.set_time_limit_enabled(false);
   Game game(config, Game::Mode::kPlayerVsAI);
   CHECK(count_alternatives(game.position(), player) > 0);
-  for (int col = 14; col > 11; --col) CHECK(game.TryPlaceStone(ToAction(14, col)));
+
+  for (int col = 14; col > 11; --col) {
+    CHECK(game.TryPlaceStone(ToAction(14, col)));
+  }
   CHECK(game.board().stone_count() == 3);
   CHECK(count_alternatives(game.position(), player) > 0);
+
   CHECK(game.TryPlaceStone(ToAction(14, 11)));
   CHECK(game.board().stone_count() == 4);
   CHECK(count_alternatives(game.position(), player) == 0);
@@ -768,6 +842,7 @@ void MoveSamplingBoundaries() {
   game.Undo();
   CHECK(game.board().stone_count() == 2);
   CHECK(count_alternatives(game.position(), player) > 0);
+
   game.Start();
   CHECK(count_alternatives(game.position(), player) > 0);
 
@@ -777,12 +852,12 @@ void MoveSamplingBoundaries() {
   CHECK(count_alternatives(game.position(), zero_moves) == 0);
 }
 
-// Verifies fallback and extreme temperature behavior during move sampling.
 void MoveSamplingEdgeCases() {
   GamePosition position;
   auto evaluator = SamplingEvaluator(position);
   AIPlayer unvisited(evaluator, {5.0f, 1}, 12345);
   CHECK(unvisited.PickMove(position) == 0);
+
   evaluator->output.policy[0] = 0.3f;
   CHECK(unvisited.PickMove(position) == 0);
   unvisited.Reset();
@@ -803,9 +878,11 @@ void MoveSamplingEdgeCases() {
 
   const auto moves = DrawMoves();
   for (int i = 0; i < kActionCount - 1; ++i) position.PlayMove(moves[i]);
+
   AIPlayer last_move(evaluator, {5.0f, 2, 1.0f, kActionCount}, 12345);
   CHECK(last_move.PickMove(position) == moves.back());
   CHECK(position.board().stone_count() == kActionCount - 1);
+
   position.PlayMove(moves.back());
   last_move.ObserveMove(moves.back());
   const int calls = evaluator->calls;
@@ -813,7 +890,10 @@ void MoveSamplingEdgeCases() {
   CHECK(evaluator->calls == calls);
 }
 
-// Verifies that two AI players share an evaluator while keeping separate trees.
+// ---------------------------------------------------------------------------
+// Match coordination and full-game integration
+// ---------------------------------------------------------------------------
+
 void IndependentAIPlayers() {
   auto evaluator = std::make_shared<FakeEvaluator>();
   std::vector<int> evaluated_stones;
@@ -821,47 +901,56 @@ void IndependentAIPlayers() {
     evaluated_stones.push_back(position.board().stone_count());
     return evaluator->output;
   };
+
   AIPlayer black(evaluator, {0.5f, 1});
   AIPlayer white(evaluator, {9.0f, 3});
   GamePosition empty;
   CHECK(black.PickMove(empty).has_value());
   CHECK(evaluator->calls == 1);
   CHECK(white.PickMove(empty).has_value());
-  CHECK(evaluator->calls == 4);  // Separate simulation budgets.
+  CHECK(evaluator->calls == 4);
+
   black.Reset();
   evaluated_stones.clear();
   CHECK(white.PickMove(empty).has_value());
-  CHECK(evaluated_stones.front() > 0);  // Resetting Black did not reset White.
+  CHECK(evaluated_stones.front() > 0);
 
   Configuration config;
   config.set_time_limit_enabled(true);
-  config.set_time_limit_seconds(0);  // Neither AI may lose to this time limit.
+  config.set_time_limit_seconds(0);
   config.set_ai_options(AIPlayerId::kPlayer1, {0.5f, 1});
   config.set_ai_options(AIPlayerId::kPlayer2, {9.0f, 3});
+
   Match match(config, Game::Mode::kAIvsAI, evaluator);
   const Game& game = match.game();
   for (int round = 0; round < 2; ++round) {
     match.Restart();
     while (game.state() == Game::State::kPlaying) {
       CHECK(match.IsAITurn());
-      // Searches run on a worker thread, as in the GUI.
-      auto result = std::async(std::launch::async, [&] { return match.Think(); });
+      auto result =
+          std::async(std::launch::async, [&] { return match.Think(); });
       const auto action = result.get();
       CHECK(action.has_value());
       CHECK(match.Play(*action));
       CHECK(game.record().size() <= kActionCount);
     }
+
     CHECK(game.position().is_terminal());
     CHECK(!match.Think());
     const auto record = match.FinalizeRecord();
     CHECK(!record.metadata().time_limit_enabled);
     CHECK(GamePosition::Rebuild(record.moves(), record.size())->result() ==
           game.position().result());
+
     const auto path = std::filesystem::current_path() / "test-self-play.gom";
     struct Cleanup {
       std::filesystem::path path;
-      ~Cleanup() { std::error_code ec; std::filesystem::remove(path, ec); }
+      ~Cleanup() {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+      }
     } cleanup{path};
+
     CHECK(FileManager::Save(record, path.string()));
     ReplayController replay;
     CHECK(replay.Load(path.string()));
@@ -871,7 +960,6 @@ void IndependentAIPlayers() {
   }
 }
 
-// Verifies that Match seats AIs and keeps their trees in sync with the board.
 void MatchTurnsAndUndo() {
   Configuration config;
   config.set_time_limit_enabled(false);
@@ -891,9 +979,9 @@ void MatchTurnsAndUndo() {
   const Game& game = match.game();
   CHECK(!match.seat(Player::kBlack));
   CHECK(match.seat(Player::kWhite) == AIPlayerId::kPlayer1);
+
   for (int turn = 0; turn < 4; ++turn) {
     CHECK(!match.IsAITurn());
-    // Human moves are synced into the AI tree, so its search stays legal.
     CHECK(match.Play(ToAction(14, turn)));
     CHECK(match.IsAITurn());
     const Action reply = match.PlayAIMove();
@@ -905,7 +993,7 @@ void MatchTurnsAndUndo() {
   CHECK(game.record().size() == 6);
   CHECK(!match.IsAITurn());
   CHECK(match.Play(ToAction(14, 10)));
-  match.PlayAIMove();  // A stale tree would replay an undone move here.
+  match.PlayAIMove();
   CHECK(game.record().size() == 8);
 
   match.Restart();
@@ -919,15 +1007,18 @@ void FullGameWithUndo() {
   Configuration config;
   config.set_time_limit_enabled(false);
   config.set_undo_enabled(true);
+
   Game game(config);
   game.Start();
   AIPlayer player(std::make_unique<FakeEvaluator>(), {5.f, 8});
   bool undone = false;
+
   while (game.state() == Game::State::kPlaying) {
     const auto action = player.PickMove(game.position());
     CHECK(action.has_value());
     CHECK(game.TryPlaceStone(*action));
     player.ObserveMove(*action);
+
     if (!undone && game.record().size() == 8) {
       game.Undo();
       player.Reset();
@@ -936,11 +1027,14 @@ void FullGameWithUndo() {
     }
     CHECK(game.record().size() <= kActionCount);
   }
+
   CHECK(undone);
   CHECK(game.position().is_terminal());
   CHECK(!player.PickMove(game.position()));
+
   const auto record = game.FinalizeRecord();
-  CHECK(GamePosition::Rebuild(record.moves(), record.size())->result() == game.position().result());
+  CHECK(GamePosition::Rebuild(record.moves(), record.size())->result() ==
+        game.position().result());
 }
 
 }  // namespace

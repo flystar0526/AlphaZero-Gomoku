@@ -10,12 +10,15 @@
 #include <utility>
 #include <vector>
 
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
 namespace {
 
 constexpr Action kNoAction = -1;
 
-// Adds this scope's wall-clock time to one SearchTiming field. With a null
-// `timing` it never reads the clock, so the GUI search path pays nothing.
+// Scoped timer that accumulates elapsed milliseconds into a SearchTiming field.
 class PhaseTimer {
  public:
   PhaseTimer(SearchTiming* timing, double SearchTiming::*field)
@@ -39,19 +42,22 @@ class PhaseTimer {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// MCTS::TreeNode
+// ---------------------------------------------------------------------------
+
 struct MCTS::TreeNode {
   TreeNode* parent = nullptr;
   Action action = kNoAction;
   std::vector<TreeNode> children;
   int visits = 0;
-  // Value from the perspective of the player who took `action`.
   float q_value = 0.0f;
   float prior = 0.0f;
 
   TreeNode(TreeNode* parent, Action action, float prior)
       : parent(parent), action(action), prior(prior) {}
 
-  // Selects the child that maximizes the PUCT score: Q + U.
+  // Selects the child with the highest PUCT score (Q + U).
   TreeNode* Select(float c_puct) {
     TreeNode* best_child = nullptr;
     float best_score = -std::numeric_limits<float>::infinity();
@@ -70,7 +76,7 @@ struct MCTS::TreeNode {
     return best_child;
   }
 
-  // Propagates the leaf value to the root, flipping perspective each ply.
+  // Updates visit counts and mean values along the path to the root.
   void Backup(float leaf_value) {
     float value = leaf_value;
     for (TreeNode* node = this; node != nullptr; node = node->parent) {
@@ -81,6 +87,10 @@ struct MCTS::TreeNode {
     }
   }
 };
+
+// ---------------------------------------------------------------------------
+// MCTS
+// ---------------------------------------------------------------------------
 
 bool SearchOptions::IsValid() const {
   return std::isfinite(c_puct) && c_puct > 0.0f && num_playouts > 0 &&
@@ -100,7 +110,7 @@ MCTS::~MCTS() = default;
 
 void MCTS::Playout(GamePosition position, PolicyValueEvaluator& evaluator,
                    SearchTiming* timing) {
-  // 1. Selection: descend until an unexpanded or terminal leaf.
+  // 1. Selection.
   TreeNode* node = root_.get();
   {
     PhaseTimer timer(timing, &SearchTiming::selection_ms);
@@ -110,7 +120,7 @@ void MCTS::Playout(GamePosition position, PolicyValueEvaluator& evaluator,
     }
   }
 
-  // 2. Evaluation & Expansion: terminal leaves skip both and use the result.
+  // 2. Evaluation and expansion.
   float leaf_value = 0.0f;
   if (position.is_terminal()) {
     if (position.winner().has_value()) {
@@ -125,7 +135,6 @@ void MCTS::Playout(GamePosition position, PolicyValueEvaluator& evaluator,
     }
     leaf_value = evaluation.value;
 
-    // Expansion timing lasts until the end of this branch.
     PhaseTimer timer(timing, &SearchTiming::expansion_ms);
     const std::vector<Action> legal_actions = position.LegalActions();
     double policy_sum = 0.0;
@@ -144,7 +153,7 @@ void MCTS::Playout(GamePosition position, PolicyValueEvaluator& evaluator,
     }
   }
 
-  // 3. Backup: negate so `node` stores value for the player who moved into it.
+  // 3. Backup.
   PhaseTimer timer(timing, &SearchTiming::backup_ms);
   node->Backup(-leaf_value);
 }

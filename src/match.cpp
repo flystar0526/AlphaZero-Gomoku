@@ -28,7 +28,6 @@ Match::Match(const Configuration& config, Game::Mode mode, Seats seats,
   for (Player color : {Player::kBlack, Player::kWhite}) {
     assert(seats_[Index(color)].has_value() == game_.IsAIPlayer(color));
     if (const auto id = seats_[Index(color)]) {
-      // Active AI players share one evaluator instance.
       players_[Index(color)] =
           std::make_unique<AIPlayer>(evaluator, config.ai_options(*id));
     }

@@ -6,17 +6,13 @@
 
 #include "game_position.h"
 
-// Prior move probabilities and position value returned by the evaluator.
+// Move priors and position value returned by an evaluator.
 struct Evaluation {
-  // Finite, nonnegative move weights. Need not be normalized; MCTS normalizes
-  // them over legal moves.
   std::array<float, kActionCount> policy{};
-  float value = 0.f;  // Expected outcome for the side to move, in [-1, 1].
+  float value = 0.f;
 };
 
-// Abstract interface for evaluating board positions (enables mocking in tests).
-// Implementations must return an Evaluation satisfying the contract above;
-// callers do not re-validate it.
+// Interface for evaluating board positions.
 class PolicyValueEvaluator {
  public:
   PolicyValueEvaluator() = default;
@@ -27,7 +23,7 @@ class PolicyValueEvaluator {
   virtual Evaluation Evaluate(const GamePosition& position) = 0;
 };
 
-// Evaluates game positions using a TorchScript policy-value neural network.
+// TorchScript neural network evaluator for policy and value prediction.
 class PolicyValueNetwork final : public PolicyValueEvaluator {
  public:
   enum class Device { kCuda, kCpu };
@@ -39,10 +35,12 @@ class PolicyValueNetwork final : public PolicyValueEvaluator {
 
   using Features = std::array<float, kChannels * kActionCount>;
 
-  // Encodes the position into a 3-channel CHW tensor (own, opponent, last move).
+  // Encodes `position` into a 3-channel feature tensor (own, opponent, last
+  // move).
   static Features EncodeFeatures(const GamePosition& position) {
     Features features{};
     const Cell own_cell = ToCell(position.current_player());
+
     for (Action action = 0; action < kActionCount; ++action) {
       const Cell cell = position.board().GetCell(action);
       if (cell != Cell::kEmpty) {
@@ -50,25 +48,22 @@ class PolicyValueNetwork final : public PolicyValueEvaluator {
         features[channel * kActionCount + action] = 1.f;
       }
     }
+
     if (position.last_move().has_value()) {
       features[kLastMoveChannel * kActionCount + *position.last_move()] = 1.f;
     }
     return features;
   }
 
-  // Loads the TorchScript model on the specified device and verifies its
-  // output contract once with a warm-up evaluation.
   explicit PolicyValueNetwork(const std::string& model_path,
                               Device device = Device::kCuda);
   ~PolicyValueNetwork() override;
 
-  // Runs neural network inference to predict move probabilities and value.
   Evaluation Evaluate(const GamePosition& position) override;
 
  private:
   struct Impl;
 
-  // Throws std::runtime_error if the model violates the output contract.
   void ValidateModel();
 
   std::unique_ptr<Impl> impl_;

@@ -13,14 +13,13 @@ namespace {
 
 constexpr float kPolicySumTolerance = 1e-3f;
 
-// Checks that the policy is a probability distribution and the value is
-// bounded.
 bool IsValidEvaluation(const Evaluation& evaluation) {
   float policy_sum = 0.f;
   for (float prob : evaluation.policy) {
     if (!std::isfinite(prob) || prob < 0.f) return false;
     policy_sum += prob;
   }
+
   return std::isfinite(policy_sum) &&
          std::abs(policy_sum - 1.f) <= kPolicySumTolerance &&
          std::isfinite(evaluation.value) && std::abs(evaluation.value) <= 1.f;
@@ -32,7 +31,6 @@ struct PolicyValueNetwork::Impl {
   torch::jit::Module module;
   torch::Device device{torch::kCUDA};
 
-  // Runs the model and returns its raw output.
   c10::IValue Forward(const GamePosition& position) {
     Features features = EncodeFeatures(position);
     const torch::Tensor input =
@@ -42,11 +40,12 @@ struct PolicyValueNetwork::Impl {
     return module.forward({input});
   }
 
-  // Converts (log_policy, value) output tensors into an Evaluation.
+  // Converts raw (log_policy, value) tensors into an Evaluation.
   static Evaluation ToEvaluation(const c10::IValue& output) {
     const auto& elements = output.toTuple()->elements();
     const torch::Tensor policy_cpu =
         elements[0].toTensor().exp().to(torch::kCPU).contiguous();
+
     Evaluation evaluation;
     std::copy_n(policy_cpu.data_ptr<float>(), kActionCount,
                 evaluation.policy.begin());
@@ -80,19 +79,20 @@ PolicyValueNetwork::PolicyValueNetwork(const std::string& model_path,
 
 PolicyValueNetwork::~PolicyValueNetwork() = default;
 
+// Runs a warm-up pass and verifies model output shapes and value ranges.
 void PolicyValueNetwork::ValidateModel() {
   c10::InferenceMode inference_mode;
 
-  // Output structure, shapes and dtypes are fixed by the model file, so one
-  // warm-up forward pass verifies them for every later evaluation.
   const c10::IValue output = impl_->Forward(GamePosition());
   if (!output.isTuple() || output.toTuple()->elements().size() != 2) {
     throw std::runtime_error("AI model must return (log_policy, value)");
   }
+
   const auto& elements = output.toTuple()->elements();
   if (!elements[0].isTensor() || !elements[1].isTensor()) {
     throw std::runtime_error("AI model outputs must be tensors");
   }
+
   const torch::Tensor log_policy = elements[0].toTensor();
   const torch::Tensor value = elements[1].toTensor();
   if (log_policy.sizes() != c10::IntArrayRef({1, kActionCount}) ||
@@ -102,6 +102,7 @@ void PolicyValueNetwork::ValidateModel() {
     throw std::runtime_error(
         "AI model requires float32 outputs shaped [1,225] and [1,1]");
   }
+
   if (!IsValidEvaluation(Impl::ToEvaluation(output))) {
     throw std::runtime_error(
         "AI model returned invalid probabilities or value");
@@ -111,7 +112,6 @@ void PolicyValueNetwork::ValidateModel() {
 Evaluation PolicyValueNetwork::Evaluate(const GamePosition& position) {
   c10::InferenceMode inference_mode;
   const Evaluation evaluation = Impl::ToEvaluation(impl_->Forward(position));
-  // The output contract was verified at load time; only debug builds recheck.
   assert(IsValidEvaluation(evaluation));
   return evaluation;
 }

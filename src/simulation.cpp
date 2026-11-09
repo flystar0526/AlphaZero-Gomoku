@@ -18,8 +18,7 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// One move's durations in ms, ordered as kTimingNames: the whole PickMove()
-// call first, then the four MCTS phases.
+// Per-move durations in ms: total think time followed by the four MCTS phases.
 using Durations = std::array<double, 5>;
 constexpr std::array<const char*, 5> kTimingNames = {
     "think", "selection", "expansion", "evaluation", "backup"};
@@ -28,8 +27,6 @@ constexpr std::array<Player, 2> kColors = {Player::kBlack, Player::kWhite};
 
 size_t Index(Player color) { return static_cast<size_t>(color); }
 
-// AI index (0 = Player 1, 1 = Player 2) seated at `color`; every seat in a
-// simulation holds an AI.
 size_t SeatIndex(const Seats& seats, Player color) {
   return static_cast<size_t>(*seats[Index(color)]);
 }
@@ -46,7 +43,6 @@ double Milliseconds(Clock::duration elapsed) {
 // Statistics
 // ---------------------------------------------------------------------------
 
-// Move count plus per-metric sum and maximum.
 struct TimingStatistics {
   std::int64_t moves = 0;
   Durations total{};
@@ -63,7 +59,6 @@ struct TimingStatistics {
   }
 };
 
-// Results of one AI in one color (or merged over several cells).
 struct PlayerStatistics {
   int games = 0;
   int wins = 0;
@@ -80,34 +75,28 @@ struct PlayerStatistics {
   }
 };
 
-// Indexed by AI, then color. Every summary figure is derived from these four
-// cells, so they are the single source of truth.
+// Aggregated statistics indexed by [AI player][stone color].
 using SimulationStatistics = std::array<std::array<PlayerStatistics, 2>, 2>;
 
-// Both AIs merged for one color. Each game has exactly one black and one white
-// seat, so `games` equals the completed game count.
 PlayerStatistics ColorTotal(const SimulationStatistics& stats, Player color) {
   PlayerStatistics total = stats[0][Index(color)];
   total.Merge(stats[1][Index(color)]);
   return total;
 }
 
-// Both colors merged for one AI.
 PlayerStatistics PlayerTotal(const SimulationStatistics& stats, size_t player) {
   PlayerStatistics total = stats[player][Index(Player::kBlack)];
   total.Merge(stats[player][Index(Player::kWhite)]);
   return total;
 }
 
-// Outcome of one finished game; `timing` is indexed by AI.
 struct GameResult {
-  std::optional<Player> winner;  // std::nullopt for a draw.
+  std::optional<Player> winner;
   int total_moves = 0;
   double duration_ms = 0.0;
   std::array<TimingStatistics, 2> timing;
 };
 
-// Credits a finished game to the cell of each AI in the color it played.
 void RecordGame(SimulationStatistics& stats, const Seats& seats,
                 const GameResult& game) {
   for (Player color : kColors) {
@@ -130,7 +119,7 @@ void RecordGame(SimulationStatistics& stats, const Seats& seats,
 // Log files
 // ---------------------------------------------------------------------------
 
-// Creates logs/simulation_<timestamp>_<us>[_N]; never reuses an existing one.
+// Creates a unique timestamped directory under `root` for simulation logs.
 std::filesystem::path CreateLogDirectory(const std::filesystem::path& root) {
   std::filesystem::create_directories(root);
 
@@ -138,6 +127,7 @@ std::filesystem::path CreateLogDirectory(const std::filesystem::path& root) {
   const std::time_t timestamp = std::chrono::system_clock::to_time_t(now);
   std::tm local_time{};
   localtime_r(&timestamp, &local_time);
+
   const auto microseconds =
       std::chrono::duration_cast<std::chrono::microseconds>(
           now.time_since_epoch())
@@ -148,17 +138,16 @@ std::filesystem::path CreateLogDirectory(const std::filesystem::path& root) {
   name << "simulation_" << std::put_time(&local_time, "%Y%m%d_%H%M%S") << '_'
        << std::setfill('0') << std::setw(6) << microseconds;
 
-  // Exclusive directory creation also protects simultaneous runs from overlap.
   for (int suffix = 0; suffix < 1000; ++suffix) {
     const auto directory =
         root / (name.str() + (suffix == 0 ? "" : "_" + std::to_string(suffix)));
     if (std::filesystem::create_directory(directory)) return directory;
   }
+
   throw std::runtime_error(
       "Could not create a unique simulation log directory");
 }
 
-// Opens a log that throws on write errors and formats numbers locale-free.
 std::ofstream OpenLog(const std::filesystem::path& path) {
   std::ofstream out;
   out.exceptions(std::ios::failbit | std::ios::badbit);
@@ -176,7 +165,6 @@ void WriteWinRate(std::ostream& out, int wins, int games) {
   }
 }
 
-// One [players] row: player_id,color,games,wins,losses,draws,win_rate_pct
 void WritePlayerStatistics(std::ostream& out, size_t player, const char* color,
                            const PlayerStatistics& stats) {
   out << player + 1 << ',' << color << ',' << stats.games << ',' << stats.wins
@@ -185,7 +173,6 @@ void WritePlayerStatistics(std::ostream& out, size_t player, const char* color,
   out << '\n';
 }
 
-// One [timing] row per metric: player_id,color,moves,metric,total,mean,max
 void WriteTimingStatistics(std::ostream& out, size_t player, const char* color,
                            const TimingStatistics& stats) {
   for (size_t i = 0; i < kTimingNames.size(); ++i) {
@@ -199,7 +186,7 @@ void WriteTimingStatistics(std::ostream& out, size_t player, const char* color,
   }
 }
 
-// Rewrites summary.txt from scratch, so it is valid after every game.
+// Writes summary.txt with run metadata, AI settings, win rates, and timings.
 void WriteSummary(const std::filesystem::path& directory,
                   const SimulationOptions& options, const Configuration& config,
                   const SimulationStatistics& stats, const char* status,
@@ -208,7 +195,6 @@ void WriteSummary(const std::filesystem::path& directory,
   const PlayerStatistics black = ColorTotal(stats, Player::kBlack);
   const int completed_games = black.games;
 
-  // Run metadata.
   out << "status = " << status << "\nrequested_games = " << options.num_games
       << "\ncompleted_games = " << completed_games
       << "\nmodel_path = " << options.model_path
@@ -216,13 +202,11 @@ void WriteSummary(const std::filesystem::path& directory,
       << "win_rate = wins / games (draws included)\n";
   if (!error.empty()) out << "error = " << error << '\n';
 
-  // Search settings of each AI.
   out << "\n[configuration]\n";
   for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
     WriteAIOptions(out, player, config.ai_options(player));
   }
 
-  // Win rate of each color regardless of which AI played it.
   out << "\n[overall]\ncolor,games,wins,win_rate_pct\n";
   for (Player color : kColors) {
     const int wins = ColorTotal(stats, color).wins;
@@ -230,10 +214,8 @@ void WriteSummary(const std::filesystem::path& directory,
     WriteWinRate(out, wins, completed_games);
     out << '\n';
   }
-  // Every game has one black seat, so black-cell draws count each draw once.
   out << "draws = " << black.draws << '\n';
 
-  // Each AI's results by color, then in total.
   out << "\n[players]\nplayer_id,color,games,wins,losses,draws,win_rate_pct\n";
   for (size_t player = 0; player < stats.size(); ++player) {
     for (Player color : kColors) {
@@ -243,7 +225,6 @@ void WriteSummary(const std::filesystem::path& directory,
     WritePlayerStatistics(out, player, "all", PlayerTotal(stats, player));
   }
 
-  // Each AI's thinking time by color, then in total.
   out << "\n[timing]\nplayer_id,color,moves,metric,total_ms,mean_ms,max_ms\n";
   for (size_t player = 0; player < stats.size(); ++player) {
     for (Player color : kColors) {
@@ -257,7 +238,6 @@ void WriteSummary(const std::filesystem::path& directory,
   out.close();
 }
 
-// One games.csv row; a draw leaves the winner id empty.
 void WriteGameRow(std::ostream& out, int game_number, const Seats& seats,
                   const GameResult& game) {
   out << game_number << ',' << SeatIndex(seats, Player::kBlack) + 1 << ','
@@ -289,7 +269,7 @@ void PrintProgress(std::ostream& out, int game_number, int num_games,
 // Game loop
 // ---------------------------------------------------------------------------
 
-// Plays one game to the end, appending one moves.csv row per move.
+// Plays a single game to completion and logs each move to `moves`.
 GameResult PlayGame(int game_number, Match& match, std::ostream& moves) {
   const Game& game = match.game();
   GameResult result;
@@ -300,7 +280,6 @@ GameResult PlayGame(int game_number, Match& match, std::ostream& moves) {
     const size_t player = static_cast<size_t>(*match.seat(color));
     const int move_number = game.next_move_number();
 
-    // think_ms wraps the whole AI search; phase times come from MCTS.
     SearchTiming timing;
     const auto start = Clock::now();
     const auto action = match.Think(&timing);
@@ -357,12 +336,11 @@ std::filesystem::path RunSimulation(
     for (int index = 0; index < options.num_games; ++index) {
       const int game_number = index + 1;
 
-      // Player 1 is black in odd games; settings follow the AI, not the color.
+      // Alternate colors between AI Player 1 and AI Player 2 each game.
       const bool swapped = index % 2 == 1;
       const Seats seats = {
           swapped ? AIPlayerId::kPlayer2 : AIPlayerId::kPlayer1,
           swapped ? AIPlayerId::kPlayer1 : AIPlayerId::kPlayer2};
-      // Both AIs share one evaluator, so the model is loaded only once.
       Match match(config, Game::Mode::kAIvsAI, seats, evaluator);
 
       const GameResult result = PlayGame(game_number, match, moves);
@@ -370,7 +348,6 @@ std::filesystem::path RunSimulation(
       moves.flush();
       games.flush();
 
-      // Only completed games reach the summary.
       RecordGame(stats, seats, result);
       WriteSummary(directory, options, config, stats, "running");
       if (progress) {
@@ -383,7 +360,6 @@ std::filesystem::path RunSimulation(
     games.close();
     WriteSummary(directory, options, config, stats, "complete");
   } catch (const std::exception& error) {
-    // Keep partial logs and mark the summary failed if it is still writable.
     const std::string message =
         "Simulation failed; logs: " + directory.string() + ": " + error.what();
     try {

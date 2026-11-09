@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -27,7 +28,7 @@ constexpr const char* kTempPrefix = "gomoku-simulation-test";
 // Fixtures
 // ---------------------------------------------------------------------------
 
-// Nine-move game (ten for White) where `winner` gets five in row 7.
+// Returns a short move sequence where `winner` completes five in row 7.
 std::vector<Action> WinningMoves(Player winner) {
   std::vector<Action> moves;
   if (winner == Player::kWhite) moves.push_back(ToAction(14, 14));
@@ -39,9 +40,8 @@ std::vector<Action> WinningMoves(Player winner) {
   return moves;
 }
 
-// Forces each game to follow a script (cycling through `scripts` per game) by
-// putting all policy mass on the scripted move. Records which move numbers
-// were evaluated and can throw at (fail_game, fail_move) to simulate failure.
+// Evaluator that forces games to follow scripted move sequences and can inject
+// failures at a chosen game and move.
 class ScriptedEvaluator : public PolicyValueEvaluator {
  public:
   std::vector<std::vector<Action>> scripts = {WinningMoves(Player::kBlack)};
@@ -53,10 +53,10 @@ class ScriptedEvaluator : public PolicyValueEvaluator {
     CHECK(!position.is_terminal());
     const int move = position.board().stone_count();
 
-    // An empty board marks the start of a new game.
     if (move == 0) evaluated_moves.emplace_back();
     CHECK(!evaluated_moves.empty());
     evaluated_moves.back().push_back(move);
+
     if (static_cast<int>(evaluated_moves.size()) == fail_game &&
         move == fail_move) {
       throw std::runtime_error("inference failed");
@@ -65,6 +65,7 @@ class ScriptedEvaluator : public PolicyValueEvaluator {
     const auto& script = scripts[(evaluated_moves.size() - 1) % scripts.size()];
     CHECK(move < static_cast<int>(script.size()));
     CHECK(position.IsLegalMove(script[move]));
+
     Evaluation result;
     result.policy[script[move]] = 1.0f;
     return result;
@@ -83,8 +84,7 @@ std::string ReadFile(const std::filesystem::path& path) {
   return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
 
-// Parses CSV rows after the heading line, from the file start or from a
-// summary.txt `[section]`, stopping at a blank line or the next section.
+// Parses CSV rows from the start of `text` or from a `[section]` block.
 Table ReadTable(const std::string& text, const std::string& section = "") {
   size_t start = 0;
   if (!section.empty()) {
@@ -93,9 +93,11 @@ Table ReadTable(const std::string& text, const std::string& section = "") {
     CHECK(start != std::string::npos);
     start += marker.size();
   }
+
   std::istringstream input(text.substr(start));
   std::string line;
-  std::getline(input, line);  // Skip the column headings.
+  std::getline(input, line);
+
   Table rows;
   while (std::getline(input, line) && !line.empty() && line.front() != '[') {
     std::istringstream row(line);
@@ -107,13 +109,12 @@ Table ReadTable(const std::string& text, const std::string& section = "") {
   return rows;
 }
 
-// Distinct settings per AI so tests can see they follow the AI, not the color.
 Configuration TestConfiguration(int player_2_budget = 1) {
   Configuration config;
   config.set_ai_options(AIPlayerId::kPlayer1, {5.0f, 1, 0.0f, 0});
   config.set_ai_options(AIPlayerId::kPlayer2, {2.0f, player_2_budget, 0.0f, 0});
   config.set_time_limit_enabled(true);
-  config.set_time_limit_seconds(0);  // AI turns must remain exempt.
+  config.set_time_limit_seconds(0);
   return config;
 }
 
@@ -128,31 +129,28 @@ void CheckZeroTiming(const SearchTiming& timing) {
 // Tests
 // ---------------------------------------------------------------------------
 
-// MCTS phase timing: reset on entry, zero when no work is done, and no effect
-// on move choice.
+// Verifies MCTS phase timing reset, terminal handling, and determinism.
 void SearchPhaseTiming() {
   auto evaluator = std::make_shared<ScriptedEvaluator>();
   MCTS search({5.0f, 1, 0.0f, 0});
   SearchTiming timing{1e6, 1e6, 1e6, 1e6};
   search.Search(GamePosition(), *evaluator, &timing);
 
-  // Stale values must be cleared by Search().
   for (double value : {timing.selection_ms, timing.expansion_ms,
                        timing.evaluation_ms, timing.backup_ms}) {
     CHECK(std::isfinite(value) && value >= 0.0 && value < 1e6);
   }
 
-  // Terminal positions do no search work at all.
   GamePosition terminal;
   const auto actions = WinningMoves(Player::kBlack);
   for (Action action : actions) terminal.PlayMove(action);
   search.Search(terminal, *evaluator, &timing);
   CheckZeroTiming(timing);
 
-  // Reusing a terminal child performs selection/backup without inference.
   GamePosition before_win;
-  for (size_t i = 0; i + 1 < actions.size(); ++i)
+  for (size_t i = 0; i + 1 < actions.size(); ++i) {
     before_win.PlayMove(actions[i]);
+  }
 
   class WinningEvaluator : public PolicyValueEvaluator {
    public:
@@ -173,7 +171,6 @@ void SearchPhaseTiming() {
   CHECK(timing.evaluation_ms == 0.0);
   CHECK(timing.expansion_ms == 0.0);
 
-  // Instrumentation must preserve sampling decisions and per-search budgets.
   class UniformEvaluator : public PolicyValueEvaluator {
    public:
     int calls = 0;
@@ -184,6 +181,7 @@ void SearchPhaseTiming() {
       return output;
     }
   };
+
   auto uniform = std::make_shared<UniformEvaluator>();
   AIPlayer timed(uniform, {5.0f, 8, 1.0f, 30}, 123);
   AIPlayer untimed(uniform, {5.0f, 8, 1.0f, 30}, 123);
@@ -205,41 +203,38 @@ void SearchPhaseTiming() {
   CheckZeroTiming(timing);
 }
 
-// Three games: colors alternate, settings stay with each AI, and the summary
-// agrees with values recomputed from moves.csv.
+// Verifies alternating colors, per-AI settings, and log consistency.
 void AlternatingColorsAndLogs() {
   test::TempDirectory temp(kTempPrefix);
   SimulationOptions options;
   options.num_games = 3;
   options.log_root = temp.path;
+
   auto evaluator = std::make_shared<ScriptedEvaluator>();
   const auto config = TestConfiguration(2);
   std::ostringstream progress;
   const auto directory = RunSimulation(options, config, evaluator, &progress);
   CHECK(directory.parent_path() == temp.path);
 
-  // games.csv: Player 1 is black in odd games and always wins as black.
   const auto games = ReadTable(ReadFile(directory / "games.csv"));
   CHECK(games.size() == 3);
   CHECK(games[0][1] == "1" && games[0][2] == "2" && games[0][3] == "1");
   CHECK(games[1][1] == "2" && games[1][2] == "1" && games[1][3] == "2");
   CHECK(games[2][1] == "1" && games[2][2] == "2" && games[2][3] == "1");
 
-  // Player 2 has two playouts, so it evaluates a second position per move.
   CHECK(evaluator->evaluated_moves.size() == 3);
   CHECK(evaluator->evaluated_moves[0][1] == 1);
   CHECK(evaluator->evaluated_moves[0][2] == 2);
   CHECK(evaluator->evaluated_moves[1][1] == 1);
-  CHECK(evaluator->evaluated_moves[1][2] == 1);  // Player 2 kept its budget.
+  CHECK(evaluator->evaluated_moves[1][2] == 1);
 
-  // moves.csv: replay every move and accumulate expected timing statistics,
-  // indexed by [AI][color][metric].
   const auto moves = ReadTable(ReadFile(directory / "moves.csv"));
   CHECK(moves.size() == 27);
 
   std::array<std::array<int, 2>, 2> counts{};
   std::array<std::array<std::array<double, 5>, 2>, 2> totals{};
   std::array<std::array<std::array<double, 5>, 2>, 2> maxima{};
+
   for (size_t game = 0; game < games.size(); ++game) {
     GamePosition position;
     CHECK(games[game][4] == "black" && games[game][5] == "9");
@@ -250,10 +245,12 @@ void AlternatingColorsAndLogs() {
       CHECK(row.size() == 11);
       CHECK(std::stoul(row[0]) == game + 1);
       CHECK(std::stoul(row[1]) == move + 1);
+
       const size_t color = move % 2;
       const size_t player = color == 0 ? game % 2 : 1 - game % 2;
       CHECK(std::stoul(row[2]) == player + 1);
       CHECK(row[3] == (color == 0 ? "black" : "white"));
+
       const Action action = ToAction(std::stoi(row[4]), std::stoi(row[5]));
       CHECK(position.IsLegalMove(action));
       position.PlayMove(action);
@@ -267,13 +264,11 @@ void AlternatingColorsAndLogs() {
         maxima[player][color][i] = std::max(maxima[player][color][i], duration);
         if (i > 0) phase_sum += duration;
       }
-      // Phases never overlap, so they cannot exceed total thinking time.
       CHECK(std::stod(row[6]) + 1e-5 >= phase_sum);
     }
     CHECK(position.winner() == Player::kBlack);
   }
 
-  // summary.txt: metadata, win rates, and timing rows (color 2 = "all").
   const auto summary = ReadFile(directory / "summary.txt");
   CHECK(summary.find("status = complete\n") != std::string::npos);
   CHECK(summary.find("completed_games = 3\n") != std::string::npos);
@@ -311,22 +306,23 @@ void AlternatingColorsAndLogs() {
   }
   CHECK(progress.str().find("Game 3/3:") != std::string::npos);
 
-  // A second run gets its own directory; empty cells report N/A.
   options.num_games = 1;
   evaluator = std::make_shared<ScriptedEvaluator>();
   const auto second = RunSimulation(options, config, evaluator);
   CHECK(second != directory && std::filesystem::exists(directory));
+
   const auto single = ReadFile(second / "summary.txt");
   CHECK(single.find("1,white,0,0,0,0,N/A\n") != std::string::npos);
   CHECK(single.find("2,black,0,think,0.000000,N/A,N/A\n") != std::string::npos);
 }
 
-// White wins and draws are counted per color and per AI.
+// Verifies that White wins and draws are tallied per color and per AI.
 void WhiteWinsAndDraws() {
   test::TempDirectory temp(kTempPrefix);
   SimulationOptions options;
   options.num_games = 2;
   options.log_root = temp.path;
+
   auto evaluator = std::make_shared<ScriptedEvaluator>();
   evaluator->scripts = {WinningMoves(Player::kWhite), DrawMoves()};
   const auto directory = RunSimulation(options, TestConfiguration(), evaluator);
@@ -343,18 +339,17 @@ void WhiteWinsAndDraws() {
   CHECK(summary.find("1,all,2,0,1,1,0.000000\n") != std::string::npos);
 }
 
-// A mid-run failure keeps partial logs and marks the summary failed; invalid
-// input is rejected up front.
+// Verifies partial log preservation on mid-run failure and input validation.
 void FailedSimulation() {
   test::TempDirectory temp(kTempPrefix);
   SimulationOptions options;
   options.num_games = 3;
   options.log_root = temp.path;
+
   auto evaluator = std::make_shared<ScriptedEvaluator>();
   evaluator->fail_game = 2;
   evaluator->fail_move = 2;
 
-  // Game 2 fails on its second move, after game 1 completed.
   bool failed = false;
   try {
     RunSimulation(options, TestConfiguration(), evaluator);
@@ -371,13 +366,11 @@ void FailedSimulation() {
   CHECK(summary.find("completed_games = 1\n") != std::string::npos);
   CHECK(summary.find("error = inference failed\n") != std::string::npos);
 
-  // The unfinished game leaves move rows but no game row or statistics.
   CHECK(ReadTable(ReadFile(directory / "games.csv")).size() == 1);
   CHECK(ReadTable(ReadFile(directory / "moves.csv")).size() == 11);
   CHECK(summary.find("1,black,5,think,") != std::string::npos);
   CHECK(summary.find("1,white,0,0,0,0,N/A\n") != std::string::npos);
 
-  // Invalid input: non-positive count, missing evaluator, unusable log root.
   for (int count : {0, -1}) {
     options.num_games = count;
     CheckThrows<std::invalid_argument>(
@@ -403,6 +396,7 @@ int main() {
       {"white wins and draws", WhiteWinsAndDraws},
       {"failed simulation", FailedSimulation},
   };
+
   int failures = 0;
   for (const auto& [name, test] : tests) {
     try {
@@ -415,4 +409,3 @@ int main() {
   }
   return failures == 0 ? 0 : 1;
 }
-#include <algorithm>

@@ -24,14 +24,14 @@ std::optional<Action> AIPlayer::PickMove(const GamePosition& position,
       mcts_.Search(position, *evaluator_, timing);
   if (candidates.empty()) return std::nullopt;
 
-  // Select the move with the highest visit count, breaking ties by higher
-  // prior probability and then smaller action index for deterministic play.
+  // Find the most visited move (breaking ties by prior, then action index).
   const auto best_move =
       std::max_element(candidates.begin(), candidates.end(),
                        [](const MoveVisits& a, const MoveVisits& b) {
                          return std::make_tuple(a.visits, a.prior, -a.action) <
                                 std::make_tuple(b.visits, b.prior, -b.action);
                        });
+
   const SearchOptions& options = mcts_.options();
   if (options.temperature == 0.0f ||
       position.board().stone_count() >= options.num_sampling_moves ||
@@ -39,15 +39,17 @@ std::optional<Action> AIPlayer::PickMove(const GamePosition& position,
     return best_move->action;
   }
 
-  // Sample a move with probability proportional to visits^(1 / temperature).
+  // Sample a move weighted by visit count and temperature during opening moves.
   const double exponent = 1.0 / static_cast<double>(options.temperature);
   std::vector<double> weights;
   weights.reserve(candidates.size());
+
   for (const MoveVisits& move : candidates) {
     weights.push_back(std::pow(static_cast<double>(move.visits) /
                                    static_cast<double>(best_move->visits),
                                exponent));
   }
+
   std::discrete_distribution<int> distribution(weights.begin(), weights.end());
   return candidates[distribution(random_)].action;
 }

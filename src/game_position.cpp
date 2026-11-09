@@ -11,7 +11,6 @@ std::optional<GamePosition> GamePosition::Rebuild(
   GamePosition position;
   for (int i = 0; i < num_steps; ++i) {
     const MoveRecord& move = moves[i];
-    // Reject corrupted records (wrong move index, out-of-turn player, or OOB).
     if (move.move_number != i + 1 ||
         move.player != position.current_player() ||
         !IsValidCell(move.row, move.col)) {
@@ -39,7 +38,6 @@ void GamePosition::PlayMove(Action action) {
     result_ = PositionResult::kDraw;
   }
 
-  // Always switch turns so MCTS evaluations remain from the next player's view.
   current_player_ = Opponent(current_player_);
 }
 

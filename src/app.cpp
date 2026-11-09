@@ -19,30 +19,21 @@
 #include <cstdio>
 
 // ---------------------------------------------------------------------------
-// GLFW error callback
+// Lifecycle and navigation
 // ---------------------------------------------------------------------------
 
 static void GlfwErrorCallback(int error, const char* description) {
   std::fprintf(stderr, "GLFW Error %d: %s\n", error, description);
 }
 
-// ---------------------------------------------------------------------------
-// Constructor / Destructor
-// ---------------------------------------------------------------------------
-
 App::App() = default;
 
 App::~App() { Shutdown(); }
-
-// ---------------------------------------------------------------------------
-// Init / Shutdown
-// ---------------------------------------------------------------------------
 
 bool App::Init() {
   glfwSetErrorCallback(GlfwErrorCallback);
   if (!glfwInit()) return false;
 
-  // GL 3.0 + GLSL 130 (Linux).
   const char* glsl_version = "#version 130";
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
@@ -52,18 +43,18 @@ bool App::Init() {
     glfwTerminate();
     return false;
   }
+
   glfwMakeContextCurrent(window_);
-  glfwSwapInterval(1);  // vsync
+  glfwSwapInterval(1);
 
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
+
   ImGuiIO& io = ImGui::GetIO();
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-  // Disable .ini persistence for a self-contained executable.
   io.IniFilename = nullptr;
 
   ImGui::StyleColorsDark();
-  // Tweak style for a cleaner game UI.
   ImGuiStyle& style = ImGui::GetStyle();
   style.WindowRounding = 6.0f;
   style.FrameRounding = 4.0f;
@@ -77,9 +68,11 @@ bool App::Init() {
 void App::Shutdown() {
   WaitForAI();
   if (!window_) return;
+
   ImGui_ImplOpenGL3_Shutdown();
   ImGui_ImplGlfw_Shutdown();
   ImGui::DestroyContext();
+
   glfwDestroyWindow(window_);
   glfwTerminate();
   window_ = nullptr;
@@ -88,18 +81,19 @@ void App::Shutdown() {
 void App::WaitForAI() {
   if (ai_result_.valid()) {
     ai_result_.wait();
-    ai_result_ = {};  // Exceptions from obsolete results are discarded too.
+    ai_result_ = {};
   }
 }
 
 void App::StartGame(Game::Mode mode) {
   WaitForAI();
+
   try {
     std::shared_ptr<PolicyValueEvaluator> evaluator;
     if (mode != Game::Mode::kPlayerVsPlayer) {
       evaluator = std::make_shared<PolicyValueNetwork>("model/alpha-zero.pt");
     }
-    // Created after model initialization so turn timers start afterwards.
+
     match_ = std::make_unique<Match>(config_, mode, std::move(evaluator));
     ai_error_msg_.clear();
     return_to_menu_requested_ = false;
@@ -150,16 +144,12 @@ void App::Run() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Per-frame dispatch
-// ---------------------------------------------------------------------------
-
 void App::RenderFrame() {
-  // Full-screen borderless window that fills the GLFW framebuffer.
   ImGuiIO& io = ImGui::GetIO();
   ImGui::SetNextWindowPos({0, 0});
   ImGui::SetNextWindowSize(io.DisplaySize);
   ImGui::SetNextWindowBgAlpha(0.0f);
+
   ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
                            ImGuiWindowFlags_NoMove |
                            ImGuiWindowFlags_NoScrollWithMouse |
@@ -194,17 +184,18 @@ void App::RenderFrame() {
 void App::DrawMainMenu() {
   const float panel_w = 340.0f;
   const float panel_h = ai_error_msg_.empty() ? 400.0f : 510.0f;
+
   ImGuiIO& io = ImGui::GetIO();
   ImGui::SetNextWindowPos({(io.DisplaySize.x - panel_w) * 0.5f,
                            (io.DisplaySize.y - panel_h) * 0.5f},
                           ImGuiCond_Always);
   ImGui::SetNextWindowSize({panel_w, panel_h});
+
   ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
                            ImGuiWindowFlags_NoMove |
                            ImGuiWindowFlags_NoScrollbar;
   ImGui::Begin("##menu", nullptr, flags);
 
-  // Title.
   ImGui::SetWindowFontScale(1.8f);
   float title_w = ImGui::CalcTextSize("GOMOKU").x;
   ImGui::SetCursorPosX((panel_w - title_w) * 0.5f);
@@ -223,14 +214,17 @@ void App::DrawMainMenu() {
     StartGame(Game::Mode::kPlayerVsPlayer);
   }
   ImGui::Spacing();
+
   if (centred_btn("Player vs AI")) {
     StartGame(Game::Mode::kPlayerVsAI);
   }
   ImGui::Spacing();
+
   if (centred_btn("AI vs AI")) {
     StartGame(Game::Mode::kAIvsAI);
   }
   ImGui::Spacing();
+
   if (centred_btn("Replay")) {
     replay_path_buf_[0] = '\0';
     replay_error_msg_.clear();
@@ -239,6 +233,7 @@ void App::DrawMainMenu() {
     state_ = AppState::kReplay;
   }
   ImGui::Spacing();
+
   if (centred_btn("Settings")) {
     settings_undo_enabled_ = config_.undo_enabled();
     settings_time_enabled_ = config_.time_limit_enabled();
@@ -250,6 +245,7 @@ void App::DrawMainMenu() {
     state_ = AppState::kSettings;
   }
   ImGui::Spacing();
+
   if (centred_btn("Quit")) {
     glfwSetWindowShouldClose(window_, GLFW_TRUE);
   }
@@ -269,6 +265,7 @@ void App::DrawMainMenu() {
 void App::DrawGame() {
   const Game& game = match_->game();
   const bool spectating = game.mode() == Game::Mode::kAIvsAI;
+
   if (spectating) {
     ImGui::BeginDisabled(return_to_menu_requested_);
     if (ImGui::Button("Back to Menu", {140, 32})) {
@@ -277,7 +274,6 @@ void App::DrawGame() {
     ImGui::EndDisabled();
   }
 
-  // Wait non-blockingly for the active search before leaving AI vs AI.
   if (return_to_menu_requested_) {
     if (!ai_result_.valid() ||
         ai_result_.wait_for(std::chrono::seconds(0)) ==
@@ -296,9 +292,11 @@ void App::DrawGame() {
     return;
   }
 
+  // Status bar: turn info and remaining time.
   const bool ai_turn = match_->IsAITurn();
   const char* player_name =
       (game.current_player() == Player::kBlack) ? "Black" : "White";
+
   ImGui::SetWindowFontScale(1.15f);
   ImGui::Text("Move %d  |  %s to play", game.next_move_number(), player_name);
   ImGui::SetWindowFontScale(1.0f);
@@ -312,13 +310,14 @@ void App::DrawGame() {
       ImGui::Text("  |  Time: %.1fs", secs);
     }
   }
+
   if (ai_turn && !return_to_menu_requested_) {
     ImGui::SameLine();
     ImGui::TextColored({0.4f, 0.8f, 1.0f, 1.0f}, "  |  AI is thinking...");
   }
   ImGui::Spacing();
 
-  // Run at most one background search; the match is only read meanwhile.
+  // Launch or poll the background AI search.
   if (ai_turn && !return_to_menu_requested_) {
     try {
       if (!ai_result_.valid()) {
@@ -339,11 +338,11 @@ void App::DrawGame() {
     }
   }
 
+  // Board rendering and human move input.
   const float offset_x =
       (ImGui::GetContentRegionAvail().x - Grid::kCanvasSize) * 0.5f;
   if (offset_x > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset_x);
 
-  // Keep the board read-only for the entire frame of an AI turn.
   const auto last_move = game.position().last_move();
   if (ai_turn) {
     Grid::DrawBoardReadOnly(game.board(), last_move);
@@ -378,10 +377,8 @@ void App::DrawGame() {
 
 void App::DrawGameOver() {
   const Game& game = match_->game();
-  // Show the final board (read-only).
-  ImGui::SetWindowFontScale(1.15f);
 
-  // Result banner.
+  ImGui::SetWindowFontScale(1.15f);
   if (game.winner().has_value()) {
     const char* name = (*game.winner() == Player::kBlack) ? "Black" : "White";
     if (game.state() == Game::State::kTimeout)
@@ -396,7 +393,6 @@ void App::DrawGameOver() {
   ImGui::SetWindowFontScale(1.0f);
   ImGui::Spacing();
 
-  // Board.
   float avail_x = ImGui::GetContentRegionAvail().x;
   float offset_x = (avail_x - Grid::kCanvasSize) * 0.5f;
   if (offset_x > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset_x);
@@ -404,13 +400,13 @@ void App::DrawGameOver() {
 
   ImGui::Spacing();
 
-  // ── Save dialog ────────────────────────────────────────────────────────
+  // Save record prompt and file path input.
   if (!save_attempted_) {
     ImGui::TextUnformatted("Save game record?");
     ImGui::SameLine();
     if (ImGui::Button("Save")) {
       save_attempted_ = true;
-      // Build default path.
+
       std::time_t t = std::time(nullptr);
       std::tm* tm_buf = std::localtime(&t);
       std::ostringstream ss;
@@ -431,14 +427,12 @@ void App::DrawGameOver() {
     ImGui::SameLine();
     if (ImGui::Button("Confirm")) {
       std::string path(save_path_buf_);
-      // Ensure parent directory exists.
-      {
-        std::filesystem::path p(path);
-        if (p.has_parent_path()) {
-          std::error_code ec;
-          std::filesystem::create_directories(p.parent_path(), ec);
-        }
+      std::filesystem::path p(path);
+      if (p.has_parent_path()) {
+        std::error_code ec;
+        std::filesystem::create_directories(p.parent_path(), ec);
       }
+
       if (FileManager::Save(*finished_record_, path)) {
         save_status_msg_ = "Saved to: " + path;
       } else {
@@ -475,11 +469,13 @@ void App::DrawGameOver() {
 void App::RefreshReplayFiles() {
   replay_files_.clear();
   replay_files_error_msg_.clear();
+
   auto paths = FileManager::ListGameFiles("saves");
   if (!paths) {
     replay_files_error_msg_ = "Failed to read saves/.";
     return;
   }
+
   replay_files_.reserve(paths->size());
   for (auto& path : *paths) {
     std::string filename = std::filesystem::path(path).filename().string();
@@ -500,6 +496,7 @@ void App::DrawReplay() {
   ImGui::TextUnformatted("Replay");
   ImGui::SetNextItemOpen(replay_files_open_);
   replay_files_open_ = ImGui::CollapsingHeader("Saved games (saves/)");
+
   if (replay_files_open_) {
     if (ImGui::Button("Refresh")) RefreshReplayFiles();
     if (!replay_files_error_msg_.empty()) {
@@ -541,7 +538,7 @@ void App::DrawReplay() {
 
   if (replay_.total_moves() > 0) {
     ImGui::Spacing();
-    // Navigation controls.
+
     bool prev = ImGui::Button("< Prev", {90, 30}) ||
                 ImGui::IsKeyPressed(ImGuiKey_LeftArrow) ||
                 ImGui::IsKeyPressed(ImGuiKey_P);
@@ -555,7 +552,6 @@ void App::DrawReplay() {
     if (prev) replay_.Seek(replay_.step() - 1);
     if (next) replay_.Seek(replay_.step() + 1);
 
-    // Metadata.
     const GameMetadata& meta = replay_.record().metadata();
     ImGui::Text("Date: %s  |  Moves: %d  |  Winner: %s", meta.date.c_str(),
                 meta.total_moves,
@@ -597,6 +593,7 @@ void App::DrawSettings() {
 
   ImGui::Checkbox("Enable undo", &settings_undo_enabled_);
   ImGui::Spacing();
+
   ImGui::Checkbox("Enable per-move time limit", &settings_time_enabled_);
   ImGui::TextDisabled("Applies to human players only.");
   if (settings_time_enabled_) {
@@ -611,12 +608,14 @@ void App::DrawSettings() {
   ImGui::TextDisabled("Player vs AI uses AI Player 1 settings.");
   ImGui::TextDisabled(
       "Set temperature or num_sampling_moves to 0 to disable sampling.");
+
   bool valid_ai_options = true;
   for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
     ImGui::PushID(static_cast<int>(player));
     const char* name =
         player == AIPlayerId::kPlayer1 ? "AI Player 1" : "AI Player 2";
     ImGui::TextUnformatted(name);
+
     auto& options = settings_ai_options_[static_cast<size_t>(player)];
     ImGui::SetNextItemWidth(160.0f);
     ImGui::InputInt("num_playouts", &options.num_playouts);
@@ -626,10 +625,12 @@ void App::DrawSettings() {
     ImGui::InputFloat("temperature", &options.temperature, 0.1f, 1.0f, "%.6g");
     ImGui::SetNextItemWidth(160.0f);
     ImGui::InputInt("num_sampling_moves", &options.num_sampling_moves);
+
     valid_ai_options = valid_ai_options && options.IsValid();
     ImGui::PopID();
     ImGui::Spacing();
   }
+
   if (!valid_ai_options) {
     ImGui::TextColored({1.0f, 0.25f, 0.25f, 1.0f},
                        "Requires num_playouts > 0, c_puct > 0, temperature >= 0, "
@@ -654,6 +655,7 @@ void App::DrawSettings() {
     state_ = AppState::kMainMenu;
   }
   ImGui::EndDisabled();
+
   ImGui::SameLine();
   if (ImGui::Button("Cancel", {100, 34})) {
     state_ = AppState::kMainMenu;

@@ -8,7 +8,7 @@
 #include "game_record.h"
 #include "move_record.h"
 
-// Non-blocking game session controller for an immediate-mode GUI loop.
+// Manages rules, turn timers, move history, and outcome for a single game.
 class Game {
  public:
   enum class State { kPlaying, kWin, kDraw, kTimeout, kForfeit };
@@ -17,29 +17,20 @@ class Game {
   explicit Game(const Configuration& config,
                 Mode mode = Mode::kPlayerVsPlayer);
 
-  // Returns true if `player` is controlled by an AI in the current mode.
   bool IsAIPlayer(Player player) const;
   Mode mode() const { return mode_; }
 
-  // Resets the board, record, and timers for a new game.
+  // Lifecycle and move actions.
   void Start();
-
-  // Checks human turn timers and transitions to kTimeout if time expired.
   void Update();
-
-  // Plays `action` if legal and the game is ongoing.
   bool TryPlaceStone(Action action);
-
-  // Reverts the last full turn (two plies) so the same player moves again.
   void Undo();
-
-  // Ends the game immediately with the opponent as winner.
   void Forfeit();
 
-  // Seals and returns the game record. Requires the game to have ended.
+  // Seals and returns the completed game record.
   GameRecord FinalizeRecord();
 
-  // Returns remaining turn time, or -1.0f when disabled or on an AI turn.
+  // Returns remaining turn time in seconds, or -1.0f if untimed.
   float GetSecondsRemaining() const;
 
   State state() const { return state_; }

@@ -29,6 +29,10 @@ std::optional<Player> ParsePlayer(const std::string& s) {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// FileManager
+// ---------------------------------------------------------------------------
+
 std::optional<std::vector<std::string>> FileManager::ListGameFiles(
     const std::string& directory) {
   std::error_code error;
@@ -51,10 +55,6 @@ std::optional<std::vector<std::string>> FileManager::ListGameFiles(
   std::sort(files.begin(), files.end());
   return files;
 }
-
-// ---------------------------------------------------------------------------
-// FileManager::Save
-// ---------------------------------------------------------------------------
 
 bool FileManager::Save(const GameRecord& record, const std::string& path) {
   std::ofstream out(path);
@@ -87,10 +87,6 @@ bool FileManager::Save(const GameRecord& record, const std::string& path) {
   return out.good();
 }
 
-// ---------------------------------------------------------------------------
-// FileManager::Load
-// ---------------------------------------------------------------------------
-
 std::optional<GameRecord> FileManager::Load(const std::string& path) try {
   std::ifstream in(path);
   if (!in.is_open()) return std::nullopt;
@@ -120,6 +116,7 @@ std::optional<GameRecord> FileManager::Load(const std::string& path) try {
     if (section == Section::kMetadata) {
       std::string key, value;
       if (!SplitKeyValue(line, key, value)) return std::nullopt;
+
       if (key == "date") {
         meta.date = value;
       } else if (key == "duration_sec") {
@@ -147,6 +144,7 @@ std::optional<GameRecord> FileManager::Load(const std::string& path) try {
       if (!(ss >> m.move_number >> player_str >> m.row >> m.col)) {
         return std::nullopt;
       }
+
       auto p = ParsePlayer(player_str);
       if (!p.has_value()) return std::nullopt;
       m.player = *p;
@@ -154,8 +152,9 @@ std::optional<GameRecord> FileManager::Load(const std::string& path) try {
     }
   }
 
-  if (!metadata_complete || meta.total_moves != static_cast<int>(moves.size()))
+  if (!metadata_complete || meta.total_moves != static_cast<int>(moves.size())) {
     return std::nullopt;
+  }
 
   GameRecord loaded;
   loaded.Finalize(meta);
