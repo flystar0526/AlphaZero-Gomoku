@@ -609,33 +609,78 @@ void App::DrawSettings() {
   ImGui::TextDisabled(
       "Set temperature or num_sampling_moves to 0 to disable sampling.");
 
+  // One column per AI player so both fit without scrolling.
+  static constexpr const char* kSearchLimits[] = {"Playouts", "Think time"};
+  static constexpr const char* kParallelModes[] = {"None", "Virtual Loss",
+                                                   "WU-PUCT"};
+  constexpr float kInputWidth = 150.0f;
+
   bool valid_ai_options = true;
-  for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
-    ImGui::PushID(static_cast<int>(player));
-    const char* name =
-        player == AIPlayerId::kPlayer1 ? "AI Player 1" : "AI Player 2";
-    ImGui::TextUnformatted(name);
+  if (ImGui::BeginTable("ai_players", 2)) {
+    for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
+      ImGui::TableNextColumn();
+      ImGui::PushID(static_cast<int>(player));
+      const char* name =
+          player == AIPlayerId::kPlayer1 ? "AI Player 1" : "AI Player 2";
+      ImGui::TextUnformatted(name);
 
-    auto& options = settings_ai_options_[static_cast<size_t>(player)];
-    ImGui::SetNextItemWidth(160.0f);
-    ImGui::InputInt("num_playouts", &options.num_playouts);
-    ImGui::SetNextItemWidth(160.0f);
-    ImGui::InputFloat("c_puct", &options.c_puct, 0.1f, 1.0f, "%.6g");
-    ImGui::SetNextItemWidth(160.0f);
-    ImGui::InputFloat("temperature", &options.temperature, 0.1f, 1.0f, "%.6g");
-    ImGui::SetNextItemWidth(160.0f);
-    ImGui::InputInt("num_sampling_moves", &options.num_sampling_moves);
+      auto& options = settings_ai_options_[static_cast<size_t>(player)];
+      int search_limit = static_cast<int>(options.search_limit);
+      ImGui::SetNextItemWidth(kInputWidth);
+      if (ImGui::Combo("search_limit", &search_limit, kSearchLimits,
+                       IM_ARRAYSIZE(kSearchLimits))) {
+        options.search_limit = static_cast<SearchLimit>(search_limit);
+      }
+      ImGui::SetNextItemWidth(kInputWidth);
+      if (options.search_limit == SearchLimit::kPlayouts) {
+        ImGui::InputInt("num_playouts", &options.num_playouts);
+      } else {
+        ImGui::InputInt("think_time_ms", &options.think_time_ms, 100, 1000);
+      }
+      ImGui::SetNextItemWidth(kInputWidth);
+      ImGui::InputFloat("c_puct", &options.c_puct, 0.1f, 1.0f, "%.6g");
+      ImGui::SetNextItemWidth(kInputWidth);
+      ImGui::InputFloat("temperature", &options.temperature, 0.1f, 1.0f,
+                        "%.6g");
+      ImGui::SetNextItemWidth(kInputWidth);
+      ImGui::InputInt("num_sampling_moves", &options.num_sampling_moves);
 
-    valid_ai_options = valid_ai_options && options.IsValid();
-    ImGui::PopID();
-    ImGui::Spacing();
+      ImGui::Spacing();
+      int parallel_mode = static_cast<int>(options.parallel_mode);
+      ImGui::SetNextItemWidth(kInputWidth);
+      if (ImGui::Combo("parallel_mode", &parallel_mode, kParallelModes,
+                       IM_ARRAYSIZE(kParallelModes))) {
+        options.parallel_mode = static_cast<ParallelMode>(parallel_mode);
+      }
+      if (options.parallel_mode == ParallelMode::kVirtualLoss) {
+        ImGui::SetNextItemWidth(kInputWidth);
+        ImGui::InputFloat("virtual_loss", &options.virtual_loss, 0.1f, 1.0f,
+                          "%.6g");
+      }
+      ImGui::SetNextItemWidth(kInputWidth);
+      ImGui::InputInt("num_threads", &options.num_threads);
+      ImGui::SetNextItemWidth(kInputWidth);
+      ImGui::InputInt("batch_size", &options.batch_size);
+      ImGui::SetNextItemWidth(kInputWidth);
+      ImGui::InputInt("batch_timeout_us", &options.batch_timeout_us, 100,
+                      1000);
+
+      valid_ai_options = valid_ai_options && options.IsValid();
+      ImGui::PopID();
+    }
+    ImGui::EndTable();
   }
 
   if (!valid_ai_options) {
-    ImGui::TextColored({1.0f, 0.25f, 0.25f, 1.0f},
-                       "Requires num_playouts > 0, c_puct > 0, temperature >= 0, "
-                       "and num_sampling_moves in 0..%d.",
-                       kActionCount);
+    ImGui::PushStyleColor(ImGuiCol_Text, {1.0f, 0.25f, 0.25f, 1.0f});
+    ImGui::TextWrapped(
+        "Requires num_playouts > 0, think_time_ms in 1..%d, c_puct > 0, "
+        "temperature >= 0, num_sampling_moves in 0..%d, virtual_loss > 0, "
+        "num_threads in 1..%d, batch_size in 1..num_threads, and "
+        "batch_timeout_us in 1..%d.",
+        SearchOptions::kMaxThinkTimeMs, kActionCount,
+        SearchOptions::kMaxThreads, SearchOptions::kMaxBatchTimeoutUs);
+    ImGui::PopStyleColor();
   }
 
   ImGui::Spacing();
