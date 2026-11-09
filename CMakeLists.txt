@@ -67,7 +67,6 @@ add_executable(gomoku
   src/main.cpp
   src/app.cpp
   src/grid.cpp
-  src/info_panel.cpp
 )
 target_include_directories(gomoku PRIVATE include)
 target_compile_options(gomoku PRIVATE -Wall -Wextra)
