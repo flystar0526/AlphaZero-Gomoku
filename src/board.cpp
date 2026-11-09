@@ -1,19 +1,20 @@
 #include "board.h"
 
+#include <cassert>
+
 void Board::Reset() {
   cells_.fill(Cell::kEmpty);
   stone_count_ = 0;
 }
 
-bool Board::PlaceStone(Action action, Player player) {
-  if (!IsLegalMove(action)) return false;
+void Board::PlaceStone(Action action, Player player) {
+  assert(IsLegalMove(action));
   cells_[action] = ToCell(player);
   ++stone_count_;
-  return true;
 }
 
 Cell Board::GetCell(Action action) const {
-  if (!IsValidAction(action)) return Cell::kEmpty;
+  assert(IsValidAction(action));
   return cells_[action];
 }
 
@@ -31,9 +32,8 @@ std::vector<Action> Board::LegalActions() const {
 }
 
 bool Board::CheckWin(Action action, Player player) const {
-  if (!IsValidAction(action) || cells_[action] != ToCell(player)) {
-    return false;
-  }
+  assert(IsValidAction(action));
+  if (cells_[action] != ToCell(player)) return false;
 
   const int row = ActionRow(action);
   const int col = ActionCol(action);

@@ -46,10 +46,10 @@ class Board {
   // Clears the board to its initial empty state.
   void Reset();
 
-  // Places a stone for `player`. Returns false if out of bounds or occupied.
-  bool PlaceStone(Action action, Player player);
+  // Places a stone for `player`. Requires IsLegalMove(action).
+  void PlaceStone(Action action, Player player);
 
-  // Returns the cell state, or Cell::kEmpty if out of bounds.
+  // Returns the cell state. Requires a valid action.
   Cell GetCell(Action action) const;
 
   // Checks if the action is within bounds and the cell is empty.
@@ -62,6 +62,7 @@ class Board {
   int stone_count() const { return stone_count_; }
 
   // Checks if `player` has five or more stones in a row through `action`.
+  // Requires a valid action.
   bool CheckWin(Action action, Player player) const;
 
   // Checks if the board has no empty cells left (draw condition).

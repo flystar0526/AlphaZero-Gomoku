@@ -62,16 +62,12 @@ void BoardRules() {
   for (const auto& cell : std::vector<std::pair<int, int>>{
            {-1, 0}, {0, -1}, {kBoardSize, 0}, {0, kBoardSize}})
     CHECK(!IsValidCell(cell.first, cell.second));
-  CHECK(!board.PlaceStone(-1, Player::kBlack));
-  CHECK(!board.PlaceStone(kActionCount, Player::kBlack));
   CHECK(!board.IsLegalMove(-1));
   CHECK(!board.IsLegalMove(kActionCount));
-  CHECK(board.PlaceStone(ToAction(0, 1), Player::kBlack));
-  CHECK(!board.PlaceStone(ToAction(0, 1), Player::kWhite));
+  board.PlaceStone(ToAction(0, 1), Player::kBlack);
+  CHECK(!board.IsLegalMove(ToAction(0, 1)));
   CHECK(board.stone_count() == 1);
   CHECK(board.GetCell(ToAction(0, 1)) == Cell::kBlack);
-  CHECK(board.GetCell(-1) == Cell::kEmpty);
-  CHECK(board.GetCell(kActionCount) == Cell::kEmpty);
 
   const int directions[][2] = {{0, 1}, {1, 0}, {1, 1}, {1, -1}};
   for (const auto& direction : directions) {
@@ -81,7 +77,7 @@ void BoardRules() {
       const int row = i * direction[0];
       const int col = start_col + i * direction[1];
       const Action action = ToAction(row, col);
-      CHECK(board.PlaceStone(action, Player::kWhite));
+      board.PlaceStone(action, Player::kWhite);
       CHECK(board.CheckWin(action, Player::kWhite) == (i >= 4));
       CHECK(!board.CheckWin(action, Player::kBlack));
     }
@@ -89,12 +85,10 @@ void BoardRules() {
     CHECK(!board.CheckWin(
         ToAction(6 * direction[0], start_col + 6 * direction[1]),
         Player::kWhite));
-    CHECK(!board.CheckWin(-1, Player::kWhite));
-    CHECK(!board.CheckWin(kActionCount, Player::kWhite));
   }
   board.Reset();
   for (Action action = 0; action < kActionCount; ++action)
-    CHECK(board.PlaceStone(action, Player::kBlack));
+    board.PlaceStone(action, Player::kBlack);
   CHECK(board.IsFull());
   CHECK(board.LegalActions().empty());
   board.Reset();
