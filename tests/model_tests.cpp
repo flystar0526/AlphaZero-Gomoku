@@ -6,6 +6,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "policy_value_network.h"
 #include "simulation.h"
@@ -68,6 +69,33 @@ int main(int argc, char** argv) {
       if (std::abs(first.policy[i] - second.policy[i]) > 1e-5f) {
         throw std::runtime_error("Inference changed between identical inputs");
       }
+    }
+
+    // A batched forward pass must match per-position inference row by row.
+    // CUDA may pick different kernels per batch size, so allow float noise.
+    GamePosition other = position;
+    other.PlayMove(ToAction(7, 7));
+    const std::vector<GamePosition> batch = {position, GamePosition(), other};
+    const auto batched = network->EvaluateBatch(batch);
+    if (batched.size() != batch.size()) {
+      throw std::runtime_error("Batch inference returned the wrong row count");
+    }
+    constexpr float kBatchTolerance = 1e-3f;
+    for (size_t row = 0; row < batch.size(); ++row) {
+      const auto single = network->Evaluate(batch[row]);
+      Validate(batched[row]);
+      bool matches =
+          std::abs(batched[row].value - single.value) <= kBatchTolerance;
+      for (int i = 0; i < kActionCount; ++i) {
+        matches = matches && std::abs(batched[row].policy[i] -
+                                      single.policy[i]) <= kBatchTolerance;
+      }
+      if (!matches) {
+        throw std::runtime_error("Batch inference differs from single inference");
+      }
+    }
+    if (!network->EvaluateBatch({}).empty()) {
+      throw std::runtime_error("Empty batch must return no evaluations");
     }
 
     if (simulation) {

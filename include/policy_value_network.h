@@ -3,6 +3,7 @@
 #include <array>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "game_position.h"
 
@@ -21,6 +22,17 @@ class PolicyValueEvaluator {
   virtual ~PolicyValueEvaluator() = default;
 
   virtual Evaluation Evaluate(const GamePosition& position) = 0;
+
+  // Evaluates `positions` in order. The default evaluates them one at a time.
+  virtual std::vector<Evaluation> EvaluateBatch(
+      const std::vector<GamePosition>& positions) {
+    std::vector<Evaluation> evaluations;
+    evaluations.reserve(positions.size());
+    for (const GamePosition& position : positions) {
+      evaluations.push_back(Evaluate(position));
+    }
+    return evaluations;
+  }
 };
 
 // TorchScript neural network evaluator for policy and value prediction.
@@ -60,6 +72,10 @@ class PolicyValueNetwork final : public PolicyValueEvaluator {
   ~PolicyValueNetwork() override;
 
   Evaluation Evaluate(const GamePosition& position) override;
+
+  // Runs a single forward pass over all `positions` as one [B,3,15,15] batch.
+  std::vector<Evaluation> EvaluateBatch(
+      const std::vector<GamePosition>& positions) override;
 
  private:
   struct Impl;

@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cmath>
 #include <stdexcept>
+#include <vector>
 
 #include <c10/core/InferenceMode.h>
 #include <torch/cuda.h>
@@ -31,26 +32,43 @@ struct PolicyValueNetwork::Impl {
   torch::jit::Module module;
   torch::Device device{torch::kCUDA};
 
-  c10::IValue Forward(const GamePosition& position) {
-    Features features = EncodeFeatures(position);
+  // Encodes `positions` into one [B,3,15,15] tensor and runs the model.
+  c10::IValue Forward(const std::vector<GamePosition>& positions) {
+    const int64_t batch_size = static_cast<int64_t>(positions.size());
+    std::vector<float> features(positions.size() * kChannels * kActionCount);
+    for (size_t i = 0; i < positions.size(); ++i) {
+      const Features encoded = EncodeFeatures(positions[i]);
+      std::copy(encoded.begin(), encoded.end(),
+                features.begin() + i * encoded.size());
+    }
+
     const torch::Tensor input =
-        torch::from_blob(features.data(), {1, kChannels, kBoardSize, kBoardSize},
+        torch::from_blob(features.data(),
+                         {batch_size, kChannels, kBoardSize, kBoardSize},
                          torch::TensorOptions().dtype(torch::kFloat32))
             .to(device);
     return module.forward({input});
   }
 
-  // Converts raw (log_policy, value) tensors into an Evaluation.
-  static Evaluation ToEvaluation(const c10::IValue& output) {
+  // Converts raw (log_policy, value) tensors into one Evaluation per row.
+  static std::vector<Evaluation> ToEvaluations(const c10::IValue& output) {
     const auto& elements = output.toTuple()->elements();
     const torch::Tensor policy_cpu =
         elements[0].toTensor().exp().to(torch::kCPU).contiguous();
+    const torch::Tensor value_cpu =
+        elements[1].toTensor().to(torch::kCPU).contiguous();
 
-    Evaluation evaluation;
-    std::copy_n(policy_cpu.data_ptr<float>(), kActionCount,
-                evaluation.policy.begin());
-    evaluation.value = elements[1].toTensor().item<float>();
-    return evaluation;
+    const int64_t batch_size = policy_cpu.size(0);
+    const float* policy = policy_cpu.data_ptr<float>();
+    const float* value = value_cpu.data_ptr<float>();
+
+    std::vector<Evaluation> evaluations(static_cast<size_t>(batch_size));
+    for (int64_t i = 0; i < batch_size; ++i) {
+      std::copy_n(policy + i * kActionCount, kActionCount,
+                  evaluations[i].policy.begin());
+      evaluations[i].value = value[i];
+    }
+    return evaluations;
   }
 };
 
@@ -83,7 +101,7 @@ PolicyValueNetwork::~PolicyValueNetwork() = default;
 void PolicyValueNetwork::ValidateModel() {
   c10::InferenceMode inference_mode;
 
-  const c10::IValue output = impl_->Forward(GamePosition());
+  const c10::IValue output = impl_->Forward({GamePosition()});
   if (!output.isTuple() || output.toTuple()->elements().size() != 2) {
     throw std::runtime_error("AI model must return (log_policy, value)");
   }
@@ -103,15 +121,25 @@ void PolicyValueNetwork::ValidateModel() {
         "AI model requires float32 outputs shaped [1,225] and [1,1]");
   }
 
-  if (!IsValidEvaluation(Impl::ToEvaluation(output))) {
+  if (!IsValidEvaluation(Impl::ToEvaluations(output).front())) {
     throw std::runtime_error(
         "AI model returned invalid probabilities or value");
   }
 }
 
 Evaluation PolicyValueNetwork::Evaluate(const GamePosition& position) {
+  return EvaluateBatch({position}).front();
+}
+
+std::vector<Evaluation> PolicyValueNetwork::EvaluateBatch(
+    const std::vector<GamePosition>& positions) {
+  if (positions.empty()) return {};
+
   c10::InferenceMode inference_mode;
-  const Evaluation evaluation = Impl::ToEvaluation(impl_->Forward(position));
-  assert(IsValidEvaluation(evaluation));
-  return evaluation;
+  std::vector<Evaluation> evaluations =
+      Impl::ToEvaluations(impl_->Forward(positions));
+  assert(evaluations.size() == positions.size());
+  assert(std::all_of(evaluations.begin(), evaluations.end(),
+                     IsValidEvaluation));
+  return evaluations;
 }
