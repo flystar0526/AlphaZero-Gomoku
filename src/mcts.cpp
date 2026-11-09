@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -13,6 +14,29 @@ namespace {
 
 constexpr Action kNoAction = -1;
 
+// Adds this scope's wall-clock time to one SearchTiming field. With a null
+// `timing` it never reads the clock, so the GUI search path pays nothing.
+class PhaseTimer {
+ public:
+  PhaseTimer(SearchTiming* timing, double SearchTiming::*field)
+      : elapsed_ms_(timing ? &(timing->*field) : nullptr) {
+    if (elapsed_ms_) start_ = Clock::now();
+  }
+
+  ~PhaseTimer() {
+    if (elapsed_ms_) {
+      *elapsed_ms_ +=
+          std::chrono::duration<double, std::milli>(Clock::now() - start_)
+              .count();
+    }
+  }
+
+ private:
+  using Clock = std::chrono::steady_clock;
+  double* elapsed_ms_;
+  Clock::time_point start_;
+};
+
 }  // namespace
 
 struct MCTS::TreeNode {
@@ -20,7 +44,8 @@ struct MCTS::TreeNode {
   Action action = kNoAction;
   std::vector<TreeNode> children;
   int visits = 0;
-  float q_value = 0.0f;  // Value from the perspective of the player who took `action`.
+  // Value from the perspective of the player who took `action`.
+  float q_value = 0.0f;
   float prior = 0.0f;
 
   TreeNode(TreeNode* parent, Action action, float prior)
@@ -45,7 +70,7 @@ struct MCTS::TreeNode {
     return best_child;
   }
 
-  // Propagates the leaf evaluation up to the root, flipping perspective each ply.
+  // Propagates the leaf value to the root, flipping perspective each ply.
   void Backup(float leaf_value) {
     float value = leaf_value;
     for (TreeNode* node = this; node != nullptr; node = node->parent) {
@@ -73,15 +98,19 @@ MCTS::MCTS(SearchOptions options) : options_(options) {
 
 MCTS::~MCTS() = default;
 
-void MCTS::Playout(GamePosition position, PolicyValueEvaluator& evaluator) {
-  // 1. Selection: descend the tree until reaching an unexpanded or terminal leaf.
+void MCTS::Playout(GamePosition position, PolicyValueEvaluator& evaluator,
+                   SearchTiming* timing) {
+  // 1. Selection: descend until an unexpanded or terminal leaf.
   TreeNode* node = root_.get();
-  while (!node->children.empty()) {
-    node = node->Select(options_.c_puct);
-    position.PlayMove(node->action);
+  {
+    PhaseTimer timer(timing, &SearchTiming::selection_ms);
+    while (!node->children.empty()) {
+      node = node->Select(options_.c_puct);
+      position.PlayMove(node->action);
+    }
   }
 
-  // 2. Evaluation & Expansion: evaluate leaf value and expand legal actions.
+  // 2. Evaluation & Expansion: terminal leaves skip both and use the result.
   float leaf_value = 0.0f;
   if (position.is_terminal()) {
     if (position.winner().has_value()) {
@@ -89,7 +118,11 @@ void MCTS::Playout(GamePosition position, PolicyValueEvaluator& evaluator) {
           (*position.winner() == position.current_player()) ? 1.0f : -1.0f;
     }
   } else {
-    const Evaluation evaluation = evaluator.Evaluate(position);
+    Evaluation evaluation;
+    {
+      PhaseTimer timer(timing, &SearchTiming::evaluation_ms);
+      evaluation = evaluator.Evaluate(position);
+    }
     if (!std::isfinite(evaluation.value) || evaluation.value < -1.0f ||
         evaluation.value > 1.0f) {
       throw std::runtime_error("Evaluator value must be finite and in [-1, 1]");
@@ -103,6 +136,8 @@ void MCTS::Playout(GamePosition position, PolicyValueEvaluator& evaluator) {
       }
     }
 
+    // Expansion timing lasts until the end of this branch.
+    PhaseTimer timer(timing, &SearchTiming::expansion_ms);
     const std::vector<Action> legal_actions = position.LegalActions();
     double policy_sum = 0.0;
     for (Action action : legal_actions) {
@@ -120,16 +155,19 @@ void MCTS::Playout(GamePosition position, PolicyValueEvaluator& evaluator) {
     }
   }
 
-  // 3. Backup: negate leaf_value so `node` stores value for the player who moved into it.
+  // 3. Backup: negate so `node` stores value for the player who moved into it.
+  PhaseTimer timer(timing, &SearchTiming::backup_ms);
   node->Backup(-leaf_value);
 }
 
 std::vector<MoveVisits> MCTS::Search(const GamePosition& position,
-                                     PolicyValueEvaluator& evaluator) {
+                                     PolicyValueEvaluator& evaluator,
+                                     SearchTiming* timing) {
+  if (timing) *timing = {};
   if (position.is_terminal()) return {};
 
   for (int i = 0; i < options_.num_playouts; ++i) {
-    Playout(position, evaluator);
+    Playout(position, evaluator, timing);
   }
 
   std::vector<MoveVisits> move_stats;

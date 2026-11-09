@@ -3,10 +3,13 @@
 
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 
 #include "policy_value_network.h"
+#include "simulation.h"
+#include "test_support.h"
 
 namespace {
 
@@ -27,6 +30,7 @@ void Validate(const Evaluation& result) {
 int main(int argc, char** argv) {
   if (argc < 2) return 1;
   const bool cuda = argc > 2 && std::string(argv[2]) == "--cuda";
+  const bool simulation = argc > 2 && std::string(argv[2]) == "--simulation";
   if (cuda && !torch::cuda::is_available()) {
     // Verify the default CUDA backend reports its GPU requirement cleanly.
     try {
@@ -48,16 +52,32 @@ int main(int argc, char** argv) {
     // Exercise the exact same PolicyValueNetwork implementation on CPU or CUDA.
     const auto device = cuda ? PolicyValueNetwork::Device::kCuda
                              : PolicyValueNetwork::Device::kCpu;
-    PolicyValueNetwork network(argv[1], device);
-    const auto first = network.Evaluate(position);
-    const auto second = network.Evaluate(position);
+    auto network = std::make_shared<PolicyValueNetwork>(argv[1], device);
+    const auto first = network->Evaluate(position);
+    const auto second = network->Evaluate(position);
     Validate(first);
     Validate(second);
     for (int i = 0; i < kActionCount; ++i)
       if (std::abs(first.policy[i] - second.policy[i]) > 1e-5f)
         throw std::runtime_error("Inference changed between identical inputs");
 
-    std::cout << (cuda ? "CUDA inference passed\n" : "CPU checkpoint contract passed\n");
+    if (simulation) {
+      // Smoke test: two tiny games with the real model, logs in a temp dir.
+      test::TempDirectory logs("gomoku-model-simulation");
+      Configuration config;
+      for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
+        config.set_ai_options(player, {5.0f, 2, 0.0f, 0});
+      }
+      SimulationOptions options;
+      options.num_games = 2;
+      options.log_root = logs.path;
+      options.model_path = argv[1];
+      RunSimulation(options, config, network, &std::cout);
+      std::cout << "CPU model simulation passed\n";
+    } else {
+      std::cout << (cuda ? "CUDA inference passed\n"
+                         : "CPU checkpoint contract passed\n");
+    }
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

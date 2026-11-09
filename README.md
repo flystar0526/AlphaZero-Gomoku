@@ -67,6 +67,56 @@ The binary is placed at `build/gomoku`
 ./build/gomoku
 ```
 
+### Headless Simulation
+
+```bash
+./build/gomoku --simulation 100
+```
+
+Runs exactly 100 AI games without initializing GLFW or ImGui. The count must be
+a positive integer. AI Player 1 plays Black in odd-numbered games and White in
+even-numbered games; AI Player 2 takes the opposite color. An odd count gives
+Player 1 one extra game as Black. Both players retain their own `gomoku.cfg`
+search settings when switching colors. The model is loaded and warmed up once;
+both search trees are reset for each game. Human turn limits do not apply.
+The existing CUDA requirement still applies, and the executable still links its
+GUI libraries, but simulation does not require a display server.
+
+Each run creates a unique `logs/simulation_<local timestamp>_<microseconds>/`
+directory relative to the working directory, and prints its path and per-game
+progress to the terminal:
+
+| File | Contents |
+|---|---|
+| `moves.csv` | Game and move numbers, AI identity, color, zero-based coordinates, total thinking time, and Selection / Expansion / Evaluation / Backup times |
+| `games.csv` | Black and White AI identities, winner identity and color, move count, and game duration; a draw has an empty winner identity |
+| `summary.txt` | Run status, requested/completed games, model path, AI settings, overall Black/White wins and win rates, and each AI's results and timing by color and in total |
+
+All durations are wall-clock milliseconds measured with a monotonic clock.
+`think_ms` covers the complete `PickMove()` call. Each phase duration is the sum
+across that move's MCTS playouts: Selection includes traversal and advancing the
+search position; Evaluation covers the evaluator call, including feature
+encoding, inference, and returning results to CPU; Expansion covers legal moves,
+prior normalization, and child creation; Backup covers value propagation.
+Terminal leaves skip Evaluation and Expansion. Phases do not overlap; other
+search work and final move selection also contribute to total thinking time.
+Model initialization, logging, and synchronizing trees after a move are outside
+`think_ms`. Game duration includes move processing, tree synchronization, and
+writing move rows, but excludes model initialization and summary writing.
+
+Win rates use `wins / games * 100`, including draws in the denominator. Each
+AI/color row uses its actual games in that color; overall Black/White rows use
+all completed games. A zero denominator is reported as `N/A`. Timing summaries
+report move counts, total, mean, and maximum durations for each metric using
+completed games only.
+
+CSV files are flushed and the summary is refreshed after every completed game.
+On an inference or logging error, the process exits with a nonzero status,
+preserves available logs, and writes `status = failed` with the error when the
+summary is writable. An unfinished game can leave move rows in `moves.csv` but
+does not contribute to summary statistics. Model initialization errors are
+reported before a run directory is created. `--help` prints command-line usage.
+
 ## How to Play
 
 Use the main menu to choose a mode. Everything is mouse-driven:
@@ -121,7 +171,7 @@ cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
-Core tests cover board rules, feature orientation, undo, replay validation, timers, AI configuration, and MCTS search. The checkpoint contract test loads the real model on CPU for format verification. The CUDA backend smoke test is explicitly skipped when a GPU is unavailable; this does not enable CPU inference in the game. The existing Linux/CUDA build requirements still apply.
+Core tests cover board rules, feature orientation, undo, replay validation, timers, AI configuration, and MCTS search. Simulation tests cover phase timing, alternating AI identities, color-specific win rates, draws, CSV/summary consistency, and failed runs. CLI tests check help and invalid arguments without a display. The checkpoint contract and two-game simulation smoke tests load the real model on CPU. The CUDA backend smoke test is explicitly skipped when a GPU is unavailable; this does not enable CPU inference in the game or simulation CLI. The existing Linux/CUDA build requirements still apply.
 
 ### Timer
 

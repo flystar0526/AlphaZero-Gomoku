@@ -49,6 +49,7 @@ add_library(gomoku_core STATIC
   src/game_record.cpp
   src/mcts.cpp
   src/replay_controller.cpp
+  src/simulation.cpp
 )
 target_include_directories(gomoku_core PUBLIC include)
 target_compile_options(gomoku_core PRIVATE -Wall -Wextra)
@@ -61,7 +62,7 @@ target_include_directories(gomoku_nn PUBLIC include)
 target_compile_options(gomoku_nn PRIVATE -Wall -Wextra)
 target_link_libraries(gomoku_nn PUBLIC gomoku_core PRIVATE "${TORCH_LIBRARIES}")
 
-# Main GUI executable
+# Main executable (GUI by default, headless with --simulation).
 add_executable(gomoku
   src/main.cpp
   src/app.cpp
@@ -81,6 +82,14 @@ if (BUILD_TESTING)
   target_link_libraries(gomoku_core_tests PRIVATE gomoku_core)
   add_test(NAME core COMMAND gomoku_core_tests)
 
+  add_executable(gomoku_simulation_tests tests/simulation_tests.cpp)
+  target_compile_options(gomoku_simulation_tests PRIVATE -Wall -Wextra)
+  target_link_libraries(gomoku_simulation_tests PRIVATE gomoku_core)
+  add_test(NAME simulation COMMAND gomoku_simulation_tests)
+  add_test(NAME cli COMMAND ${CMAKE_COMMAND}
+    "-DGOMOKU_EXECUTABLE=$<TARGET_FILE:gomoku>"
+    -P "${PROJECT_SOURCE_DIR}/tests/cli_tests.cmake")
+
   # TorchScript model contract (CPU) and inference (CUDA) tests
   add_executable(gomoku_model_tests tests/model_tests.cpp)
   target_compile_options(gomoku_model_tests PRIVATE -Wall -Wextra)
@@ -89,5 +98,7 @@ if (BUILD_TESTING)
     "${PROJECT_SOURCE_DIR}/model/alpha-zero.pt")
   add_test(NAME model_cuda COMMAND gomoku_model_tests
     "${PROJECT_SOURCE_DIR}/model/alpha-zero.pt" --cuda)
+  add_test(NAME model_simulation COMMAND gomoku_model_tests
+    "${PROJECT_SOURCE_DIR}/model/alpha-zero.pt" --simulation)
   set_tests_properties(model_cuda PROPERTIES SKIP_RETURN_CODE 77)
 endif()

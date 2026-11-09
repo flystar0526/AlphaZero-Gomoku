@@ -18,18 +18,20 @@ AIPlayer::AIPlayer(std::shared_ptr<PolicyValueEvaluator> evaluator,
   }
 }
 
-std::optional<Action> AIPlayer::PickMove(const GamePosition& position) {
-  const std::vector<MoveVisits> candidates = mcts_.Search(position, *evaluator_);
+std::optional<Action> AIPlayer::PickMove(const GamePosition& position,
+                                         SearchTiming* timing) {
+  const std::vector<MoveVisits> candidates =
+      mcts_.Search(position, *evaluator_, timing);
   if (candidates.empty()) return std::nullopt;
 
   // Select the move with the highest visit count, breaking ties by higher
   // prior probability and then smaller action index for deterministic play.
-  const auto best_move = std::max_element(
-      candidates.begin(), candidates.end(),
-      [](const MoveVisits& a, const MoveVisits& b) {
-        return std::make_tuple(a.visits, a.prior, -a.action) <
-               std::make_tuple(b.visits, b.prior, -b.action);
-      });
+  const auto best_move =
+      std::max_element(candidates.begin(), candidates.end(),
+                       [](const MoveVisits& a, const MoveVisits& b) {
+                         return std::make_tuple(a.visits, a.prior, -a.action) <
+                                std::make_tuple(b.visits, b.prior, -b.action);
+                       });
   const SearchOptions& options = mcts_.options();
   if (options.temperature == 0.0f ||
       position.board().stone_count() >= options.num_sampling_moves ||

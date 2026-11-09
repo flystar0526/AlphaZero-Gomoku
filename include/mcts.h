@@ -26,6 +26,14 @@ struct MoveVisits {
   float value = 0.0f;  // Mean value (Q) from the current player's perspective.
 };
 
+// Phase durations in milliseconds, accumulated over one search's playouts.
+struct SearchTiming {
+  double selection_ms = 0.0;
+  double expansion_ms = 0.0;
+  double evaluation_ms = 0.0;
+  double backup_ms = 0.0;
+};
+
 // Stateful Monte Carlo Tree Search engine with subtree reuse.
 // All calls must be serialized; call Reset() after undo or starting a new game.
 class MCTS {
@@ -35,9 +43,11 @@ class MCTS {
   MCTS& operator=(const MCTS&) = delete;
   ~MCTS();
 
-  // Runs simulations from `position` and returns statistics for all legal moves.
+  // Runs simulations and returns statistics for all legal moves. If supplied,
+  // timing is reset on entry; omitting it disables phase timing.
   std::vector<MoveVisits> Search(const GamePosition& position,
-                                 PolicyValueEvaluator& evaluator);
+                                 PolicyValueEvaluator& evaluator,
+                                 SearchTiming* timing = nullptr);
 
   // Advances the root to the child matching `action` to reuse its subtree.
   void ObserveMove(Action action);
@@ -51,7 +61,8 @@ class MCTS {
   struct TreeNode;
 
   // Executes a single selection, expansion, evaluation, and backup pass.
-  void Playout(GamePosition position, PolicyValueEvaluator& evaluator);
+  void Playout(GamePosition position, PolicyValueEvaluator& evaluator,
+               SearchTiming* timing);
 
   SearchOptions options_;
   std::unique_ptr<TreeNode> root_;

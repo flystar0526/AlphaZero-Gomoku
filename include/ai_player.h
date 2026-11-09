@@ -19,8 +19,9 @@ class AIPlayer {
 
   // Samples moves by visit count within the sampling move limit, then selects
   // the most visited move. Returns std::nullopt if terminal. Does not advance
-  // the search tree.
-  std::optional<Action> PickMove(const GamePosition& position);
+  // the search tree. Optional timing covers only the MCTS phases.
+  std::optional<Action> PickMove(const GamePosition& position,
+                                 SearchTiming* timing = nullptr);
 
   // Synchronizes the search tree after a move is played on the board.
   void ObserveMove(Action action);

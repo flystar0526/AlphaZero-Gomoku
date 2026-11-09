@@ -20,26 +20,14 @@
 #include "game.h"
 #include "policy_value_network.h"
 #include "replay_controller.h"
+#include "test_support.h"
 
 namespace {
 
-#define CHECK(condition)                                                       \
-  do {                                                                        \
-    if (!(condition))                                                         \
-      throw std::runtime_error(std::string(__func__) + ": " + #condition);     \
-  } while (false)
+using test::CheckThrows;
+using test::DrawMoves;
 
 bool Near(float a, float b) { return std::abs(a - b) < 1e-5f; }
-
-template <typename Exception, typename Function>
-void CheckThrows(Function function) {
-  try {
-    function();
-  } catch (const Exception&) {
-    return;
-  }
-  throw std::runtime_error("Expected exception was not thrown");
-}
 
 class FakeEvaluator : public PolicyValueEvaluator {
  public:
@@ -65,22 +53,6 @@ GamePosition PositionBeforeWin(Player player) {
   }
   CHECK(position.current_player() == player);
   return position;
-}
-
-std::vector<Action> DrawMoves() {
-  // This full board has no five on any axis: horizontal colors alternate,
-  // while vertical/diagonal runs are at most two stones long.
-  std::vector<Action> black, white, moves;
-  for (int row = 0; row < kBoardSize; ++row)
-    for (int col = 0; col < kBoardSize; ++col)
-      ((row + 2 * col) % 4 < 2 ? black : white).push_back(ToAction(row, col));
-  CHECK(black.size() == white.size() + 1);
-  for (size_t i = 0; i < white.size(); ++i) {
-    moves.push_back(black[i]);
-    moves.push_back(white[i]);
-  }
-  moves.push_back(black.back());
-  return moves;
 }
 
 void BoardRules() {
