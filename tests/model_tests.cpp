@@ -91,7 +91,8 @@ int main(int argc, char** argv) {
                                       single.policy[i]) <= kBatchTolerance;
       }
       if (!matches) {
-        throw std::runtime_error("Batch inference differs from single inference");
+        throw std::runtime_error(
+            "Batch inference differs from single inference");
       }
     }
     if (!network->EvaluateBatch({}).empty()) {

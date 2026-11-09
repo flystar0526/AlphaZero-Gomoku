@@ -88,18 +88,28 @@ progress to the terminal:
 
 | File | Contents |
 |---|---|
-| `moves.csv` | Game and move numbers, AI identity, color, zero-based coordinates, total thinking time, and Selection / Expansion / Evaluation / Backup times |
+| `moves.csv` | Game and move numbers, AI identity, color, zero-based coordinates, total thinking time, Selection / Expansion / Evaluation / Inference / Backup times, completed playouts, inference batches, mean batch size, and leaf collisions |
 | `games.csv` | Black and White AI identities, winner identity and color, move count, and game duration; a draw has an empty winner identity |
-| `summary.txt` | Run status, requested/completed games, model path, AI settings, overall Black/White wins and win rates, and each AI's results and timing by color and in total |
+| `summary.txt` | Run status, requested/completed games, model path, AI settings, overall Black/White wins and win rates, and each AI's results, timing, and search counters by color and in total |
 
-All durations are wall-clock milliseconds measured with a monotonic clock.
-`think_ms` covers the complete `PickMove()` call. Each phase duration is the sum
-across that move's MCTS playouts: Selection includes traversal and advancing the
-search position; Evaluation covers the evaluator call, including feature
-encoding, inference, and returning results to CPU; Expansion covers legal moves,
-prior normalization, and child creation; Backup covers value propagation.
-Terminal leaves skip Evaluation and Expansion. Phases do not overlap; other
-search work and final move selection also contribute to total thinking time.
+All durations are milliseconds measured with a monotonic clock. `think_ms` is
+the wall-clock time of the complete `PickMove()` call. Each phase duration is
+the sum across that move's MCTS playouts and all search workers, so with more
+than one thread it measures CPU time and the phases can add up to more than
+`think_ms`. Selection includes traversal, pre-updates, and advancing the search
+position; Evaluation is the time a worker waits for its leaf, from queueing it
+until the batch result returns; Expansion covers legal moves, prior
+normalization, and child creation; Backup covers value propagation. Inference
+is the batch evaluator's time inside the model call (feature encoding,
+inference, and returning results to CPU) and overlaps Evaluation. Terminal
+leaves skip Evaluation and Expansion. Thread start-up and final move selection
+also contribute to total thinking time.
+
+`playouts` counts completed simulations, `batches` counts model calls, and
+`mean_batch_size` is the positions sent divided by `batches` (`N/A` when no
+batch ran). `collisions` counts leaves that another worker expanded first; the
+worker discards its own expansion and only backs up its value. The `[search]`
+summary section reports totals and per-move means of these counters.
 Model initialization, logging, and synchronizing trees after a move are outside
 `think_ms`. Game duration includes move processing, tree synchronization, and
 writing move rows, but excludes model initialization and summary writing.
@@ -125,7 +135,7 @@ Use the main menu to choose a mode. Everything is mouse-driven:
 - **Player vs AI** — single-player mode where you play Black and the AI responds as White.
 - **AI vs AI** — watch two AI players play against each other automatically.
 - **Replay** — click a `.gom` file in the saved-game list or enter a path, then use **Prev / Next** (or ← → arrow keys) to step through moves. The list shows files directly in `saves/`, relative to the working directory, sorted by filename. It refreshes when Replay opens or when you click **Refresh**, and collapses after a successful load. A failed load preserves the current replay.
-- **Settings** — configure undo, the per-move time limit, and independent **AI Player 1** / **AI Player 2** parameters (`num_playouts`, `c_puct`, `temperature`, and `num_sampling_moves`). Changes are saved to `gomoku.cfg` and apply when the next game starts.
+- **Settings** — configure undo, the per-move time limit, and independent **AI Player 1** / **AI Player 2** parameters: search limit (`num_playouts` or `think_time_ms`), `c_puct`, `temperature`, `num_sampling_moves`, and the parallel search options described below. Changes are saved to `gomoku.cfg` and apply when the next game starts.
 
 ### AI Model
 
@@ -141,7 +151,34 @@ The bundled model is the three-channel `best_checkpoint.pt` export from the trai
 
 Coordinates are used directly, with action index `row * 15 + col`; there is no flip or transpose. The model returns a tuple of log-policy `[1, 225]` and value `[1, 1]`, with value measured from the side to move. Older nine-channel models are incompatible. Loading and inference errors are shown in the main menu.
 
-Search currently evaluates one position at a time. The GUI keeps one background AI job; batched inference and parallel MCTS are not implemented.
+### Parallel Search
+
+Each search runs `num_threads` worker threads over one shared tree (tree parallelization). Every node has its own spinlock guarding its children and their statistics, and a worker never holds two locks at once. Workers that reach an unexpanded leaf put its position into an inference queue and block. A separate batch evaluator thread sends queued positions to the model as one `[B, 3, 15, 15]` batch when `batch_size` positions are waiting, when every active worker is waiting, or when the oldest request has waited `batch_timeout_us`. Threads are started for each search and joined before the move is chosen; one worker is used when `num_threads = 1`.
+
+`parallel_mode` chooses how workers avoid following each other down the same path while results are pending. Each worker pre-updates every node it passes and reverts the pre-update during backup:
+
+| Mode | Config value | Effect on selection |
+|---|---|---|
+| None | `none` | No pre-update; workers see only completed statistics. |
+| Virtual Loss | `virtual_loss` | Each in-flight simulation counts as `virtual_loss` lost visits: `N += vl`, `W -= vl`. |
+| WU-PUCT | `wu_puct` | In-flight simulations `O` enter only the exploration term: `Q + c_puct · P · sqrt(N_parent + O_parent) / (1 + N + O)`, where `Q = W / N` is unchanged. |
+
+With one worker, no pre-update is visible during its own selection, so all three modes produce the same search.
+
+`search_limit` ends a search after `num_playouts` simulations (`playouts`) or after `think_time_ms` milliseconds (`think_time`). In think-time mode `num_playouts` is ignored; no new simulations start after the deadline, and in-flight ones finish before the move is chosen.
+
+| Key | Default | Valid range |
+|---|---|---|
+| `search_limit` | `playouts` | `playouts` or `think_time` |
+| `num_playouts` | 400 | > 0 |
+| `think_time_ms` | 1000 | 1–60000 |
+| `parallel_mode` | `none` | `none`, `virtual_loss`, or `wu_puct` |
+| `virtual_loss` | 1 | finite and > 0 |
+| `num_threads` | 1 | 1–64 |
+| `batch_size` | 1 | 1–`num_threads` |
+| `batch_timeout_us` | 1000 | 1–1000000 |
+
+Settings shows `num_playouts` or `think_time_ms` for the selected search limit and `virtual_loss` only in Virtual Loss mode; hidden values are kept and saved. If the model fails during a search, the search tree is reset and the error is reported.
 
 ### Move Sampling
 
@@ -151,7 +188,7 @@ Set either parameter to `0` to select the most visited move throughout the game.
 
 AI Player 1 and AI Player 2 have independent settings identified separately from stone colors. **Player vs AI** uses AI Player 1, which plays White. **AI vs AI** currently assigns AI Player 1 to Black and AI Player 2 to White; a color-swap control is not yet provided.
 
-Configuration keys use the prefixes `ai_player_1_` and `ai_player_2_`, followed by `num_playouts`, `c_puct`, `temperature`, or `num_sampling_moves` (for example, `ai_player_1_temperature`). Missing keys use the defaults: 400 playouts, `c_puct = 5`, `temperature = 1`, and `num_sampling_moves = 30`. Old `black_ai_*` and `white_ai_*` keys are ignored; saving settings writes only the new keys.
+Configuration keys use the prefixes `ai_player_1_` and `ai_player_2_`, followed by `num_playouts`, `c_puct`, `temperature`, `num_sampling_moves`, or one of the parallel search keys above (for example, `ai_player_1_temperature`). Missing or invalid keys use their defaults: 400 playouts, `c_puct = 5`, `temperature = 1`, and `num_sampling_moves = 30`. The `batch_size <= num_threads` constraint is checked after the whole file is read, so key order does not matter; a violation resets `batch_size` to 1. Old `black_ai_*` and `white_ai_*` keys are ignored; saving settings writes only the new keys.
 
 Each AI has an independently seeded random engine, so different games can produce different move sequences, though distinct game records are not guaranteed.
 
@@ -160,7 +197,7 @@ Each AI has an independently seeded random engine, so different games can produc
 - `Board` owns cells and shared board rules. It has no turn, model or record state.
 - `GamePosition` combines a Board with the side to move, last move and result. `PlayMove(action)` requires a legal action in an ongoing position; debug assertions enforce this precondition. Undo and replay share `GamePosition::Rebuild`.
 - `Game` handles modes, human-only clocks, input validation, forfeit and move records; search copies positions without move histories. ReplayController validates move sequences after FileManager parses the file.
-- `PolicyValueNetwork` owns three-channel feature encoding and the TorchScript backend (defaulting to CUDA for gameplay, with CPU support for headless contract tests). Its header also declares the small `PolicyValueEvaluator` interface used to test MCTS without a GPU. Each `AIPlayer` owns an MCTS instance and may share an evaluator; `ObserveMove` advances the tree after a move is accepted. Search, ObserveMove and Reset must run serially.
+- `PolicyValueNetwork` owns three-channel feature encoding and the TorchScript backend (defaulting to CUDA for gameplay, with CPU support for headless contract tests). Its header also declares the small `PolicyValueEvaluator` interface used to test MCTS without a GPU. `PolicyValueEvaluator::EvaluateBatch` evaluates several positions at once; its default evaluates them one by one. Each `AIPlayer` owns an MCTS instance and may share an evaluator; `ObserveMove` advances the tree after a move is accepted. Search is parallel internally, but Search, ObserveMove and Reset on one MCTS must run serially, and two searches must not share an evaluator at the same time.
 
 ### Tests
 
@@ -171,7 +208,15 @@ cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
-Core tests cover board rules, feature orientation, undo, replay validation, timers, AI configuration, and MCTS search. Simulation tests cover phase timing, alternating AI identities, color-specific win rates, draws, CSV/summary consistency, and failed runs. CLI tests check help and invalid arguments without a display. The checkpoint contract and two-game simulation smoke tests load the real model on CPU. The CUDA backend smoke test is explicitly skipped when a GPU is unavailable; this does not enable CPU inference in the game or simulation CLI. The existing Linux/CUDA build requirements still apply.
+Core tests cover board rules, feature orientation, undo, replay validation, timers, AI configuration, and MCTS search, including parallel invariants (pre-updates fully reverted, batch limits, worker spreading per mode, think-time limits, and error recovery). Simulation tests cover phase timing, alternating AI identities, color-specific win rates, draws, CSV/summary consistency, and failed runs. CLI tests check help and invalid arguments without a display. The checkpoint contract and two-game simulation smoke tests load the real model on CPU. The model tests also check that batched inference matches single-position inference. The CUDA backend smoke test is explicitly skipped when a GPU is unavailable; this does not enable CPU inference in the game or simulation CLI. The existing Linux/CUDA build requirements still apply.
+
+To check the parallel search for data races, build with ThreadSanitizer in a separate directory and run the core and simulation tests. LibTorch is not instrumented, so the model tests are not meaningful under TSan. Recent kernels need address-space randomization disabled with `setarch -R`:
+
+```bash
+cmake -B build-tsan -DGOMOKU_TSAN=ON
+cmake --build build-tsan --target gomoku_core_tests gomoku_simulation_tests -j$(nproc)
+setarch $(uname -m) -R ctest --test-dir build-tsan -R "^(core|simulation)$" --output-on-failure
+```
 
 ### Timer
 

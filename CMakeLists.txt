@@ -32,6 +32,14 @@ if (NOT CAFFE2_USE_CUDA)
   message(FATAL_ERROR "LibTorch with CUDA support is required")
 endif()
 
+# Optional ThreadSanitizer build for checking parallel MCTS. LibTorch is not
+# instrumented, so only the core and simulation tests give clean reports.
+option(GOMOKU_TSAN "Build with ThreadSanitizer" OFF)
+if (GOMOKU_TSAN)
+  add_compile_options(-fsanitize=thread -g)
+  add_link_options(-fsanitize=thread)
+endif()
+
 # Build bundled third-party dependencies (GLFW and Dear ImGui)
 add_subdirectory(third_party)
 
