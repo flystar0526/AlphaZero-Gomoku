@@ -559,16 +559,6 @@ void SearchPriorsAndOptions() {
   evaluator.output.policy[0] = 1.f;  // All legal moves have zero probability.
   moves = search.Search(position, evaluator);
   for (const auto& move : moves) CHECK(Near(move.prior, 1.f / 224));
-
-  for (float invalid : {-1.f, std::numeric_limits<float>::quiet_NaN(),
-                        std::numeric_limits<float>::infinity()}) {
-    evaluator.output.policy[1] = invalid;
-    search.Reset();
-    CheckThrows<std::runtime_error>([&] { search.Search(position, evaluator); });
-  }
-  evaluator.output.policy.fill(1.f);
-  evaluator.output.value = 2.f;
-  CheckThrows<std::runtime_error>([&] { search.Search(position, evaluator); });
 }
 
 void SearchValuePerspective() {

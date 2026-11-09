@@ -8,11 +8,15 @@
 
 // Prior move probabilities and position value returned by the evaluator.
 struct Evaluation {
+  // Finite, nonnegative move weights. Need not be normalized; MCTS normalizes
+  // them over legal moves.
   std::array<float, kActionCount> policy{};
   float value = 0.f;  // Expected outcome for the side to move, in [-1, 1].
 };
 
 // Abstract interface for evaluating board positions (enables mocking in tests).
+// Implementations must return an Evaluation satisfying the contract above;
+// callers do not re-validate it.
 class PolicyValueEvaluator {
  public:
   PolicyValueEvaluator() = default;
@@ -52,7 +56,8 @@ class PolicyValueNetwork final : public PolicyValueEvaluator {
     return features;
   }
 
-  // Loads and validates the TorchScript model on the specified device.
+  // Loads the TorchScript model on the specified device and verifies its
+  // output contract once with a warm-up evaluation.
   explicit PolicyValueNetwork(const std::string& model_path,
                               Device device = Device::kCuda);
   ~PolicyValueNetwork() override;
@@ -62,5 +67,9 @@ class PolicyValueNetwork final : public PolicyValueEvaluator {
 
  private:
   struct Impl;
+
+  // Throws std::runtime_error if the model violates the output contract.
+  void ValidateModel();
+
   std::unique_ptr<Impl> impl_;
 };

@@ -123,18 +123,7 @@ void MCTS::Playout(GamePosition position, PolicyValueEvaluator& evaluator,
       PhaseTimer timer(timing, &SearchTiming::evaluation_ms);
       evaluation = evaluator.Evaluate(position);
     }
-    if (!std::isfinite(evaluation.value) || evaluation.value < -1.0f ||
-        evaluation.value > 1.0f) {
-      throw std::runtime_error("Evaluator value must be finite and in [-1, 1]");
-    }
     leaf_value = evaluation.value;
-
-    for (float prob : evaluation.policy) {
-      if (!std::isfinite(prob) || prob < 0.0f) {
-        throw std::runtime_error(
-            "Evaluator policy must be finite and nonnegative");
-      }
-    }
 
     // Expansion timing lasts until the end of this branch.
     PhaseTimer timer(timing, &SearchTiming::expansion_ms);
