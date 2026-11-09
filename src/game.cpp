@@ -13,18 +13,8 @@ Game::Game(const Configuration& config, Mode mode)
 }
 
 bool Game::IsAIPlayer(Player player) const {
-  return GetAIPlayerId(player).has_value();
-}
-
-std::optional<AIPlayerId> Game::GetAIPlayerId(Player player) const {
-  if (mode_ == Mode::kAIvsAI) {
-    return player == Player::kBlack ? AIPlayerId::kPlayer1
-                                    : AIPlayerId::kPlayer2;
-  }
-  if (mode_ == Mode::kPlayerVsAI && player == Player::kWhite) {
-    return AIPlayerId::kPlayer1;
-  }
-  return std::nullopt;
+  return mode_ == Mode::kAIvsAI ||
+         (mode_ == Mode::kPlayerVsAI && player == Player::kWhite);
 }
 
 void Game::Start() {

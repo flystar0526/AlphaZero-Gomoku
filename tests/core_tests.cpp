@@ -18,6 +18,7 @@
 #include "ai_player.h"
 #include "file_manager.h"
 #include "game.h"
+#include "match.h"
 #include "policy_value_network.h"
 #include "replay_controller.h"
 #include "test_support.h"
@@ -231,8 +232,7 @@ void GameModesAndTimers() {
   CHECK(human.mode() == Game::Mode::kPlayerVsPlayer);
   CHECK(!human.IsAIPlayer(Player::kBlack));
   CHECK(!human.IsAIPlayer(Player::kWhite));
-  CHECK(!human.GetAIPlayerId(Player::kBlack));
-  CHECK(!human.GetAIPlayerId(Player::kWhite));
+  CHECK(DefaultSeats(Game::Mode::kPlayerVsPlayer) == Seats{});
   CHECK(human.GetSecondsRemaining() > 0.0f);
   CHECK(human.TryPlaceStone(ToAction(7, 7)));
   CHECK(human.GetSecondsRemaining() > 0.0f);
@@ -240,8 +240,8 @@ void GameModesAndTimers() {
   Game mixed(config, Game::Mode::kPlayerVsAI);
   CHECK(!mixed.IsAIPlayer(Player::kBlack));
   CHECK(mixed.IsAIPlayer(Player::kWhite));
-  CHECK(!mixed.GetAIPlayerId(Player::kBlack));
-  CHECK(mixed.GetAIPlayerId(Player::kWhite) == AIPlayerId::kPlayer1);
+  CHECK((DefaultSeats(Game::Mode::kPlayerVsAI) ==
+         Seats{std::nullopt, AIPlayerId::kPlayer1}));
   CHECK(mixed.GetSecondsRemaining() > 0.0f);
   CHECK(mixed.TryPlaceStone(ToAction(7, 7)));
   CHECK(mixed.GetSecondsRemaining() == -1.0f);
@@ -264,8 +264,8 @@ void GameModesAndTimers() {
   Game self_play(config, Game::Mode::kAIvsAI);
   CHECK(self_play.IsAIPlayer(Player::kBlack));
   CHECK(self_play.IsAIPlayer(Player::kWhite));
-  CHECK(self_play.GetAIPlayerId(Player::kBlack) == AIPlayerId::kPlayer1);
-  CHECK(self_play.GetAIPlayerId(Player::kWhite) == AIPlayerId::kPlayer2);
+  CHECK((DefaultSeats(Game::Mode::kAIvsAI) ==
+         Seats{AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}));
   for (int col = 0; col < 4; ++col) {
     CHECK(self_play.GetSecondsRemaining() == -1.0f);
     self_play.Update();
@@ -284,8 +284,6 @@ void GameModesAndTimers() {
   CHECK(config.undo_enabled());
   self_play.Start();
   CHECK(self_play.mode() == Game::Mode::kAIvsAI);
-  CHECK(self_play.GetAIPlayerId(Player::kBlack) == AIPlayerId::kPlayer1);
-  CHECK(self_play.GetAIPlayerId(Player::kWhite) == AIPlayerId::kPlayer2);
   CHECK(self_play.GetSecondsRemaining() == -1.0f);
   CHECK(self_play.record().size() == 0);
 }
@@ -838,27 +836,24 @@ void IndependentAIPlayers() {
   Configuration config;
   config.set_time_limit_enabled(true);
   config.set_time_limit_seconds(0);  // Neither AI may lose to this time limit.
-  Game game(config, Game::Mode::kAIvsAI);
+  config.set_ai_options(AIPlayerId::kPlayer1, {0.5f, 1});
+  config.set_ai_options(AIPlayerId::kPlayer2, {9.0f, 3});
+  Match match(config, Game::Mode::kAIvsAI, evaluator);
+  const Game& game = match.game();
   for (int round = 0; round < 2; ++round) {
-    game.Start();
-    black.Reset();
-    white.Reset();
+    match.Restart();
     while (game.state() == Game::State::kPlaying) {
-      auto& player = game.current_player() == Player::kBlack ? black : white;
-      auto result = std::async(std::launch::async, [&] {
-        return player.PickMove(game.position());
-      });
+      CHECK(match.IsAITurn());
+      // Searches run on a worker thread, as in the GUI.
+      auto result = std::async(std::launch::async, [&] { return match.Think(); });
       const auto action = result.get();
       CHECK(action.has_value());
-      CHECK(game.TryPlaceStone(*action));
-      black.ObserveMove(*action);
-      white.ObserveMove(*action);
+      CHECK(match.Play(*action));
       CHECK(game.record().size() <= kActionCount);
     }
     CHECK(game.position().is_terminal());
-    CHECK(!black.PickMove(game.position()));
-    CHECK(!white.PickMove(game.position()));
-    const auto record = game.FinalizeRecord();
+    CHECK(!match.Think());
+    const auto record = match.FinalizeRecord();
     CHECK(!record.metadata().time_limit_enabled);
     CHECK(GamePosition::Rebuild(record.moves(), record.size())->result() ==
           game.position().result());
@@ -874,6 +869,50 @@ void IndependentAIPlayers() {
     replay.Seek(record.size());
     CHECK(replay.position().board().stone_count() == record.size());
   }
+}
+
+// Verifies that Match seats AIs and keeps their trees in sync with the board.
+void MatchTurnsAndUndo() {
+  Configuration config;
+  config.set_time_limit_enabled(false);
+  config.set_undo_enabled(true);
+  config.set_ai_options(AIPlayerId::kPlayer1, {5.f, 8, 0.f, 0});
+
+  Match human(config, Game::Mode::kPlayerVsPlayer);
+  CHECK(!human.IsAITurn());
+  CHECK(human.Play(ToAction(7, 7)));
+  CHECK(!human.Play(ToAction(7, 7)));
+  CHECK(!human.IsAITurn());
+  CheckThrows<std::invalid_argument>(
+      [&] { Match no_model(config, Game::Mode::kPlayerVsAI); });
+
+  auto evaluator = std::make_shared<FakeEvaluator>();
+  Match match(config, Game::Mode::kPlayerVsAI, evaluator);
+  const Game& game = match.game();
+  CHECK(!match.seat(Player::kBlack));
+  CHECK(match.seat(Player::kWhite) == AIPlayerId::kPlayer1);
+  for (int turn = 0; turn < 4; ++turn) {
+    CHECK(!match.IsAITurn());
+    // Human moves are synced into the AI tree, so its search stays legal.
+    CHECK(match.Play(ToAction(14, turn)));
+    CHECK(match.IsAITurn());
+    const Action reply = match.PlayAIMove();
+    CHECK(game.position().last_move() == reply);
+  }
+  CHECK(game.record().size() == 8);
+
+  match.Undo();
+  CHECK(game.record().size() == 6);
+  CHECK(!match.IsAITurn());
+  CHECK(match.Play(ToAction(14, 10)));
+  match.PlayAIMove();  // A stale tree would replay an undone move here.
+  CHECK(game.record().size() == 8);
+
+  match.Restart();
+  CHECK(game.record().size() == 0);
+  CHECK(match.Play(ToAction(7, 7)));
+  match.PlayAIMove();
+  CHECK(game.board().stone_count() == 2);
 }
 
 void FullGameWithUndo() {
@@ -924,6 +963,7 @@ int main() {
       {"move sampling boundaries and undo", MoveSamplingBoundaries},
       {"move sampling edge cases", MoveSamplingEdgeCases},
       {"independent AI self-play and replay", IndependentAIPlayers},
+      {"match turns, tree sync and undo", MatchTurnsAndUndo},
       {"full game with undo", FullGameWithUndo},
   };
   int failures = 0;

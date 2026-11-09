@@ -47,6 +47,7 @@ add_library(gomoku_core STATIC
   src/game.cpp
   src/game_position.cpp
   src/game_record.cpp
+  src/match.cpp
   src/mcts.cpp
   src/replay_controller.cpp
   src/simulation.cpp

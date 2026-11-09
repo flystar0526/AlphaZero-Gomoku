@@ -7,10 +7,9 @@
 #include <string>
 #include <vector>
 
-#include "ai_player.h"
 #include "configuration.h"
-#include "game.h"
 #include "game_record.h"
+#include "match.h"
 #include "replay_controller.h"
 
 struct GLFWwindow;
@@ -40,7 +39,7 @@ class App {
   void Shutdown();
   // Finish and discard an obsolete background result before changing AI state.
   void WaitForAI();
-  // Initializes game state and AI players for the selected mode.
+  // Starts a match with AI players for the selected mode.
   void StartGame(Game::Mode mode);
   // Resets active game/AI state and returns to the main menu.
   void ReturnToMenu();
@@ -70,8 +69,8 @@ class App {
   AppState state_ = AppState::kMainMenu;
   Configuration config_;
 
-  // Active game (alive during kPlaying and kGameOver).
-  std::unique_ptr<Game> game_;
+  // Active match (alive during kPlaying and kGameOver).
+  std::unique_ptr<Match> match_;
   // Sealed record after the game ends.
   std::optional<GameRecord> finished_record_;
 
@@ -95,7 +94,7 @@ class App {
   std::array<SearchOptions, 2> settings_ai_options_{};
 
   // ── AI game fields ──────────────────────────────────────────────────────────
-  std::array<std::unique_ptr<AIPlayer>, 2> ai_players_;
+  // Background Match::Think() result for the current AI turn.
   std::future<std::optional<Action>> ai_result_;
   std::string ai_error_msg_;
   // Defers returning to menu in AI vs AI until the active search finishes.

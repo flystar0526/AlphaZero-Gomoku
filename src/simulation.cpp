@@ -12,8 +12,7 @@
 #include <sstream>
 #include <stdexcept>
 
-#include "ai_player.h"
-#include "game.h"
+#include "match.h"
 
 namespace {
 
@@ -27,10 +26,13 @@ constexpr std::array<const char*, 5> kTimingNames = {
 
 constexpr std::array<Player, 2> kColors = {Player::kBlack, Player::kWhite};
 
-// AI index (0 = Player 1, 1 = Player 2) seated at each color, indexed by color.
-using Seats = std::array<size_t, 2>;
-
 size_t Index(Player color) { return static_cast<size_t>(color); }
+
+// AI index (0 = Player 1, 1 = Player 2) seated at `color`; every seat in a
+// simulation holds an AI.
+size_t SeatIndex(const Seats& seats, Player color) {
+  return static_cast<size_t>(*seats[Index(color)]);
+}
 
 const char* ColorName(Player color) {
   return color == Player::kBlack ? "black" : "white";
@@ -109,7 +111,7 @@ struct GameResult {
 void RecordGame(SimulationStatistics& stats, const Seats& seats,
                 const GameResult& game) {
   for (Player color : kColors) {
-    const size_t player = seats[Index(color)];
+    const size_t player = SeatIndex(seats, color);
     PlayerStatistics& cell = stats[player][Index(color)];
 
     ++cell.games;
@@ -258,10 +260,11 @@ void WriteSummary(const std::filesystem::path& directory,
 // One games.csv row; a draw leaves the winner id empty.
 void WriteGameRow(std::ostream& out, int game_number, const Seats& seats,
                   const GameResult& game) {
-  out << game_number << ',' << seats[Index(Player::kBlack)] + 1 << ','
-      << seats[Index(Player::kWhite)] + 1 << ',';
+  out << game_number << ',' << SeatIndex(seats, Player::kBlack) + 1 << ','
+      << SeatIndex(seats, Player::kWhite) + 1 << ',';
   if (game.winner) {
-    out << seats[Index(*game.winner)] + 1 << ',' << ColorName(*game.winner);
+    out << SeatIndex(seats, *game.winner) + 1 << ','
+        << ColorName(*game.winner);
   } else {
     out << ",draw";
   }
@@ -271,10 +274,10 @@ void WriteGameRow(std::ostream& out, int game_number, const Seats& seats,
 void PrintProgress(std::ostream& out, int game_number, int num_games,
                    const Seats& seats, const GameResult& game) {
   out << "Game " << game_number << '/' << num_games << ": black=Player "
-      << seats[Index(Player::kBlack)] + 1 << ", white=Player "
-      << seats[Index(Player::kWhite)] + 1 << ", winner=";
+      << SeatIndex(seats, Player::kBlack) + 1 << ", white=Player "
+      << SeatIndex(seats, Player::kWhite) + 1 << ", winner=";
   if (game.winner) {
-    out << "Player " << seats[Index(*game.winner)] + 1 << " ("
+    out << "Player " << SeatIndex(seats, *game.winner) + 1 << " ("
         << ColorName(*game.winner) << ')';
   } else {
     out << "draw";
@@ -287,32 +290,27 @@ void PrintProgress(std::ostream& out, int game_number, int num_games,
 // ---------------------------------------------------------------------------
 
 // Plays one game to the end, appending one moves.csv row per move.
-GameResult PlayGame(int game_number, const Seats& seats, Game& game,
-                    std::array<AIPlayer, 2>& players, std::ostream& moves) {
-  game.Start();
-  for (auto& player : players) player.Reset();
-
+GameResult PlayGame(int game_number, Match& match, std::ostream& moves) {
+  const Game& game = match.game();
   GameResult result;
   const auto game_start = Clock::now();
 
   while (game.state() == Game::State::kPlaying) {
     const Player color = game.current_player();
-    const size_t player = seats[Index(color)];
+    const size_t player = static_cast<size_t>(*match.seat(color));
     const int move_number = game.next_move_number();
 
-    // think_ms wraps the whole PickMove(); phase times come from MCTS.
+    // think_ms wraps the whole AI search; phase times come from MCTS.
     SearchTiming timing;
     const auto start = Clock::now();
-    const auto action = players[player].PickMove(game.position(), &timing);
+    const auto action = match.Think(&timing);
     const Durations durations = {Milliseconds(Clock::now() - start),
                                  timing.selection_ms, timing.expansion_ms,
                                  timing.evaluation_ms, timing.backup_ms};
 
-    if (!action || !game.TryPlaceStone(*action)) {
+    if (!action || !match.Play(*action)) {
       throw std::runtime_error("AI returned no legal move");
     }
-    // Both trees must follow the board, as in the GUI's AI vs AI mode.
-    for (auto& ai : players) ai.ObserveMove(*action);
     result.timing[player].Add(durations);
 
     moves << game_number << ',' << move_number << ',' << player + 1 << ','
@@ -356,21 +354,18 @@ std::filesystem::path RunSimulation(
     moves.flush();
     games.flush();
 
-    // Both AIs share one evaluator, so the model is loaded only once.
-    std::array<AIPlayer, 2> players = {
-        AIPlayer(evaluator, config.ai_options(AIPlayerId::kPlayer1)),
-        AIPlayer(evaluator, config.ai_options(AIPlayerId::kPlayer2))};
-    Game game(config, Game::Mode::kAIvsAI);
-
     for (int index = 0; index < options.num_games; ++index) {
       const int game_number = index + 1;
 
       // Player 1 is black in odd games; settings follow the AI, not the color.
-      const size_t black = static_cast<size_t>(index % 2);
-      const Seats seats = {black, 1 - black};
+      const bool swapped = index % 2 == 1;
+      const Seats seats = {
+          swapped ? AIPlayerId::kPlayer2 : AIPlayerId::kPlayer1,
+          swapped ? AIPlayerId::kPlayer1 : AIPlayerId::kPlayer2};
+      // Both AIs share one evaluator, so the model is loaded only once.
+      Match match(config, Game::Mode::kAIvsAI, seats, evaluator);
 
-      const GameResult result =
-          PlayGame(game_number, seats, game, players, moves);
+      const GameResult result = PlayGame(game_number, match, moves);
       WriteGameRow(games, game_number, seats, result);
       moves.flush();
       games.flush();
