@@ -982,12 +982,21 @@ void ParallelSearchSpreadsWorkers() {
     MCTS search(options);
     BatchRecorder evaluator;
 
+    SearchTiming timing;
     const auto start = std::chrono::steady_clock::now();
-    search.Search(GamePosition(), evaluator);
+    search.Search(GamePosition(), evaluator, &timing);
     const auto elapsed = std::chrono::steady_clock::now() - start;
     // Flushing once every worker waits avoids sitting out the 1 s timeout.
     CHECK(elapsed < std::chrono::milliseconds(500));
     CHECK(search.CountInFlight() == 0);
+
+    CHECK(timing.playouts == 16);
+    CHECK(timing.batches == static_cast<int>(evaluator.batches.size()));
+    CHECK(timing.batched_positions == static_cast<int>(evaluator.positions()));
+    // Seven root collisions, plus seven more when every worker picks the
+    // same child without a pre-update.
+    CHECK(timing.collisions == (mode == ParallelMode::kNone ? 14 : 7));
+    CHECK(timing.inference_ms >= 0.0);
 
     CHECK(evaluator.batches.size() >= 2);
     CHECK(evaluator.batches[0].size() == 8);

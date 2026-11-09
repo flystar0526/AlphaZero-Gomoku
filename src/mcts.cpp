@@ -132,7 +132,10 @@ class InferenceQueue {
       lock.unlock();
       std::vector<Evaluation> results;
       std::exception_ptr error;
+      ++batches_;
+      batched_positions_ += static_cast<int>(positions.size());
       try {
+        PhaseTimer timer(&timing_, &SearchTiming::inference_ms);
         results = evaluator_.EvaluateBatch(positions);
         if (results.size() != positions.size()) {
           throw std::runtime_error(
@@ -156,6 +159,11 @@ class InferenceQueue {
       worker_cv_.notify_all();
     }
   }
+
+  // Evaluator-side counters; read only after Run() has returned.
+  double inference_ms() const { return timing_.inference_ms; }
+  int batches() const { return batches_; }
+  int batched_positions() const { return batched_positions_; }
 
  private:
   struct Request {
@@ -181,6 +189,11 @@ class InferenceQueue {
   std::deque<Request*> pending_;
   int active_workers_;
   std::exception_ptr error_;
+
+  // Touched only by the evaluator thread.
+  SearchTiming timing_;
+  int batches_ = 0;
+  int batched_positions_ = 0;
 };
 
 }  // namespace
@@ -279,7 +292,11 @@ class MCTS::Worker {
       std::lock_guard guard(node->lock);
       // Another worker may have expanded this leaf while we waited; keep its
       // children and only back up our value.
-      if (node->children.empty()) node->children = std::move(children);
+      if (node->children.empty()) {
+        node->children = std::move(children);
+      } else {
+        ++timing_.collisions;
+      }
     }
 
     // 3. Backup, reverting the pre-update along the same path.
@@ -295,6 +312,7 @@ class MCTS::Worker {
       }
       value = -value;
     }
+    ++timing_.playouts;
   }
 
   const SearchTiming& timing() const { return timing_; }
@@ -490,7 +508,12 @@ std::vector<MoveVisits> MCTS::Search(const GamePosition& position,
       timing->expansion_ms += worker->timing().expansion_ms;
       timing->evaluation_ms += worker->timing().evaluation_ms;
       timing->backup_ms += worker->timing().backup_ms;
+      timing->playouts += worker->timing().playouts;
+      timing->collisions += worker->timing().collisions;
     }
+    timing->inference_ms = queue.inference_ms();
+    timing->batches = queue.batches();
+    timing->batched_positions = queue.batched_positions();
   }
 
   std::vector<MoveVisits> move_stats;

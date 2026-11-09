@@ -232,8 +232,12 @@ void AlternatingColorsAndLogs() {
   CHECK(moves.size() == 27);
 
   std::array<std::array<int, 2>, 2> counts{};
-  std::array<std::array<std::array<double, 5>, 2>, 2> totals{};
-  std::array<std::array<std::array<double, 5>, 2>, 2> maxima{};
+  std::array<int, 2> search_moves{};
+  std::array<int, 2> search_playouts{};
+  constexpr size_t kMetrics = 6;
+  constexpr size_t kInference = 4;
+  std::array<std::array<std::array<double, kMetrics>, 2>, 2> totals{};
+  std::array<std::array<std::array<double, kMetrics>, 2>, 2> maxima{};
 
   for (size_t game = 0; game < games.size(); ++game) {
     GamePosition position;
@@ -242,7 +246,7 @@ void AlternatingColorsAndLogs() {
 
     for (size_t move = 0; move < 9; ++move) {
       const auto& row = moves[game * 9 + move];
-      CHECK(row.size() == 11);
+      CHECK(row.size() == 16);
       CHECK(std::stoul(row[0]) == game + 1);
       CHECK(std::stoul(row[1]) == move + 1);
 
@@ -256,15 +260,28 @@ void AlternatingColorsAndLogs() {
       position.PlayMove(action);
       ++counts[player][color];
 
+      // With one worker the phases (excluding inference, which overlaps
+      // evaluation) fit inside the wall-clock think time.
       double phase_sum = 0.0;
-      for (size_t i = 0; i < 5; ++i) {
+      for (size_t i = 0; i < kMetrics; ++i) {
         const double duration = std::stod(row[6 + i]);
         CHECK(std::isfinite(duration) && duration >= 0.0);
         totals[player][color][i] += duration;
         maxima[player][color][i] = std::max(maxima[player][color][i], duration);
-        if (i > 0) phase_sum += duration;
+        if (i > 0 && i != kInference) phase_sum += duration;
       }
       CHECK(std::stod(row[6]) + 1e-5 >= phase_sum);
+      CHECK(std::stod(row[10]) <= std::stod(row[9]) + 1e-5);
+
+      // Player 1 runs 1 playout and Player 2 runs 2 per move, one worker.
+      const int playouts = std::stoi(row[12]);
+      const int batches = std::stoi(row[13]);
+      CHECK(playouts == static_cast<int>(player) + 1);
+      CHECK(batches >= 1 && batches <= playouts);
+      CHECK(row[14] == "1.000000");
+      CHECK(row[15] == "0");
+      ++search_moves[player];
+      search_playouts[player] += playouts;
     }
     CHECK(position.winner() == Player::kBlack);
   }
@@ -284,11 +301,11 @@ void AlternatingColorsAndLogs() {
   CHECK(results[2][6] == "66.666667");
 
   const auto timing = ReadTable(summary, "timing");
-  CHECK(timing.size() == 30);
+  CHECK(timing.size() == 2 * 3 * kMetrics);
   for (size_t player = 0; player < 2; ++player) {
     for (size_t color = 0; color < 3; ++color) {
-      for (size_t metric = 0; metric < 5; ++metric) {
-        const auto& row = timing[(player * 3 + color) * 5 + metric];
+      for (size_t metric = 0; metric < kMetrics; ++metric) {
+        const auto& row = timing[(player * 3 + color) * kMetrics + metric];
         const int count = color == 2 ? counts[player][0] + counts[player][1]
                                      : counts[player][color];
         const double total =
@@ -304,6 +321,18 @@ void AlternatingColorsAndLogs() {
       }
     }
   }
+
+  const auto search = ReadTable(summary, "search");
+  CHECK(search.size() == 6);
+  for (size_t player = 0; player < 2; ++player) {
+    const auto& all = search[player * 3 + 2];
+    CHECK(all[1] == "all");
+    CHECK(std::stoi(all[2]) == search_moves[player]);
+    CHECK(std::stoi(all[3]) == search_playouts[player]);
+    CHECK(std::stod(all[4]) == static_cast<double>(player + 1));
+    CHECK(all[6] == "1.000000");
+    CHECK(all[7] == "0" && all[8] == "0.000000");
+  }
   CHECK(progress.str().find("Game 3/3:") != std::string::npos);
 
   options.num_games = 1;
@@ -314,6 +343,7 @@ void AlternatingColorsAndLogs() {
   const auto single = ReadFile(second / "summary.txt");
   CHECK(single.find("1,white,0,0,0,0,N/A\n") != std::string::npos);
   CHECK(single.find("2,black,0,think,0.000000,N/A,N/A\n") != std::string::npos);
+  CHECK(single.find("2,black,0,0,N/A,0,N/A,0,N/A\n") != std::string::npos);
 }
 
 // Verifies that White wins and draws are tallied per color and per AI.

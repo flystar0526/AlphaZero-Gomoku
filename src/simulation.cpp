@@ -18,10 +18,26 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// Per-move durations in ms: total think time followed by the four MCTS phases.
-using Durations = std::array<double, 5>;
-constexpr std::array<const char*, 5> kTimingNames = {
-    "think", "selection", "expansion", "evaluation", "backup"};
+// Per-move durations in ms: wall-clock think time followed by the MCTS phases
+// (summed over workers) and the batch evaluator's inference time.
+using Durations = std::array<double, 6>;
+constexpr std::array<const char*, 6> kTimingNames = {
+    "think", "selection", "expansion", "evaluation", "inference", "backup"};
+
+// Per-move search counters.
+struct Counters {
+  std::int64_t playouts = 0;
+  std::int64_t batches = 0;
+  std::int64_t batched_positions = 0;
+  std::int64_t collisions = 0;
+
+  void Merge(const Counters& other) {
+    playouts += other.playouts;
+    batches += other.batches;
+    batched_positions += other.batched_positions;
+    collisions += other.collisions;
+  }
+};
 
 constexpr std::array<Player, 2> kColors = {Player::kBlack, Player::kWhite};
 
@@ -47,8 +63,11 @@ struct TimingStatistics {
   std::int64_t moves = 0;
   Durations total{};
   Durations maximum{};
+  Counters counters;
 
-  void Add(const Durations& durations) { Merge({1, durations, durations}); }
+  void Add(const Durations& durations, const Counters& move_counters) {
+    Merge({1, durations, durations, move_counters});
+  }
 
   void Merge(const TimingStatistics& other) {
     moves += other.moves;
@@ -56,6 +75,7 @@ struct TimingStatistics {
       total[i] += other.total[i];
       maximum[i] = std::max(maximum[i], other.maximum[i]);
     }
+    counters.Merge(other.counters);
   }
 };
 
@@ -157,6 +177,15 @@ std::ofstream OpenLog(const std::filesystem::path& path) {
   return out;
 }
 
+// Writes numerator / denominator, or N/A when the denominator is zero.
+void WriteRatio(std::ostream& out, double numerator, double denominator) {
+  if (denominator == 0.0) {
+    out << "N/A";
+  } else {
+    out << numerator / denominator;
+  }
+}
+
 void WriteWinRate(std::ostream& out, int wins, int games) {
   if (games == 0) {
     out << "N/A";
@@ -184,6 +213,20 @@ void WriteTimingStatistics(std::ostream& out, size_t player, const char* color,
       out << stats.total[i] / stats.moves << ',' << stats.maximum[i] << '\n';
     }
   }
+}
+
+void WriteSearchStatistics(std::ostream& out, size_t player, const char* color,
+                           const TimingStatistics& stats) {
+  const Counters& counters = stats.counters;
+  const double moves = static_cast<double>(stats.moves);
+  out << player + 1 << ',' << color << ',' << stats.moves << ','
+      << counters.playouts << ',';
+  WriteRatio(out, counters.playouts, moves);
+  out << ',' << counters.batches << ',';
+  WriteRatio(out, counters.batched_positions, counters.batches);
+  out << ',' << counters.collisions << ',';
+  WriteRatio(out, counters.collisions, moves);
+  out << '\n';
 }
 
 // Writes summary.txt with run metadata, AI settings, win rates, and timings.
@@ -232,6 +275,17 @@ void WriteSummary(const std::filesystem::path& directory,
                             stats[player][Index(color)].timing);
     }
     WriteTimingStatistics(out, player, "all",
+                          PlayerTotal(stats, player).timing);
+  }
+
+  out << "\n[search]\nplayer_id,color,moves,total_playouts,mean_playouts,"
+         "total_batches,mean_batch_size,total_collisions,mean_collisions\n";
+  for (size_t player = 0; player < stats.size(); ++player) {
+    for (Player color : kColors) {
+      WriteSearchStatistics(out, player, ColorName(color),
+                            stats[player][Index(color)].timing);
+    }
+    WriteSearchStatistics(out, player, "all",
                           PlayerTotal(stats, player).timing);
   }
 
@@ -285,18 +339,23 @@ GameResult PlayGame(int game_number, Match& match, std::ostream& moves) {
     const auto action = match.Think(&timing);
     const Durations durations = {Milliseconds(Clock::now() - start),
                                  timing.selection_ms, timing.expansion_ms,
-                                 timing.evaluation_ms, timing.backup_ms};
+                                 timing.evaluation_ms, timing.inference_ms,
+                                 timing.backup_ms};
+    const Counters counters = {timing.playouts, timing.batches,
+                               timing.batched_positions, timing.collisions};
 
     if (!action || !match.Play(*action)) {
       throw std::runtime_error("AI returned no legal move");
     }
-    result.timing[player].Add(durations);
+    result.timing[player].Add(durations, counters);
 
     moves << game_number << ',' << move_number << ',' << player + 1 << ','
           << ColorName(color) << ',' << ActionRow(*action) << ','
           << ActionCol(*action);
     for (double duration : durations) moves << ',' << duration;
-    moves << '\n';
+    moves << ',' << counters.playouts << ',' << counters.batches << ',';
+    WriteRatio(moves, counters.batched_positions, counters.batches);
+    moves << ',' << counters.collisions << '\n';
   }
 
   result.duration_ms = Milliseconds(Clock::now() - game_start);
@@ -327,7 +386,8 @@ std::filesystem::path RunSimulation(
     auto moves = OpenLog(directory / "moves.csv");
     auto games = OpenLog(directory / "games.csv");
     moves << "game,move,player_id,color,row,col,think_ms,selection_ms,"
-             "expansion_ms,evaluation_ms,backup_ms\n";
+             "expansion_ms,evaluation_ms,inference_ms,backup_ms,playouts,"
+             "batches,mean_batch_size,collisions\n";
     games << "game,black_player_id,white_player_id,winner_player_id,"
              "winner_color,total_moves,duration_ms\n";
     moves.flush();

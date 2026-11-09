@@ -52,12 +52,19 @@ struct MoveVisits {
   float value = 0.0f;
 };
 
-// Accumulated MCTS phase durations in milliseconds for a single search.
+// Accumulated MCTS phase durations in milliseconds and counters for a single
+// search. Phase durations are summed over all workers, so with several
+// threads they measure CPU time and can exceed the wall-clock search time.
 struct SearchTiming {
   double selection_ms = 0.0;
   double expansion_ms = 0.0;
-  double evaluation_ms = 0.0;
+  double evaluation_ms = 0.0;  // Waiting for a batch result, incl. queueing.
   double backup_ms = 0.0;
+  double inference_ms = 0.0;  // Batch evaluator time spent in EvaluateBatch.
+  int playouts = 0;           // Completed simulations.
+  int batches = 0;            // EvaluateBatch calls.
+  int batched_positions = 0;  // Positions sent over all batches.
+  int collisions = 0;         // Leaves already expanded by another worker.
 };
 
 // Monte Carlo Tree Search engine with subtree reuse.
