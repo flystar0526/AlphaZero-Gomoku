@@ -228,7 +228,13 @@ void AlternatingColorsAndLogs() {
   CHECK(evaluator->evaluated_moves[1][1] == 1);
   CHECK(evaluator->evaluated_moves[1][2] == 1);
 
-  const auto moves = ReadTable(ReadFile(directory / "moves.csv"));
+  const auto moves_text = ReadFile(directory / "moves.csv");
+  CHECK(moves_text.rfind(
+            "game,move,player_id,color,row,col,think_ms,selection_ms,"
+            "expansion_ms,evaluation_ms,inference_ms,backup_ms,playouts,"
+            "batches,batched_positions,collisions\n",
+            0) == 0);
+  const auto moves = ReadTable(moves_text);
   CHECK(moves.size() == 27);
 
   std::array<std::array<int, 2>, 2> counts{};
@@ -278,7 +284,7 @@ void AlternatingColorsAndLogs() {
       const int batches = std::stoi(row[13]);
       CHECK(playouts == static_cast<int>(player) + 1);
       CHECK(batches >= 1 && batches <= playouts);
-      CHECK(row[14] == "1.000000");
+      CHECK(std::stoi(row[14]) == batches);
       CHECK(row[15] == "0");
       ++search_moves[player];
       search_playouts[player] += playouts;
@@ -322,16 +328,23 @@ void AlternatingColorsAndLogs() {
     }
   }
 
+  CHECK(summary.find(
+            "[search]\nplayer_id,color,moves,total_playouts,mean_playouts,"
+            "total_batches,mean_batches,total_batched_positions,"
+            "mean_batched_positions,total_collisions,mean_collisions,"
+            "mean_batch_size\n") != std::string::npos);
   const auto search = ReadTable(summary, "search");
   CHECK(search.size() == 6);
   for (size_t player = 0; player < 2; ++player) {
     const auto& all = search[player * 3 + 2];
     CHECK(all[1] == "all");
     CHECK(std::stoi(all[2]) == search_moves[player]);
+    CHECK(all.size() == 12);
     CHECK(std::stoi(all[3]) == search_playouts[player]);
     CHECK(std::stod(all[4]) == static_cast<double>(player + 1));
-    CHECK(all[6] == "1.000000");
-    CHECK(all[7] == "0" && all[8] == "0.000000");
+    CHECK(all[5] == all[7]);  // Batches and batched positions agree.
+    CHECK(all[9] == "0" && all[10] == "0.000000");
+    CHECK(all[11] == "1.000000");
   }
   CHECK(progress.str().find("Game 3/3:") != std::string::npos);
 
@@ -343,7 +356,8 @@ void AlternatingColorsAndLogs() {
   const auto single = ReadFile(second / "summary.txt");
   CHECK(single.find("1,white,0,0,0,0,N/A\n") != std::string::npos);
   CHECK(single.find("2,black,0,think,0.000000,N/A,N/A\n") != std::string::npos);
-  CHECK(single.find("2,black,0,0,N/A,0,N/A,0,N/A\n") != std::string::npos);
+  CHECK(single.find("2,black,0,0,N/A,0,N/A,0,N/A,0,N/A,N/A\n") !=
+        std::string::npos);
 }
 
 // Verifies that White wins and draws are tallied per color and per AI.

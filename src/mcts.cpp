@@ -5,17 +5,17 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
-#include <deque>
 #include <exception>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
-#include <system_error>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include "inference_queue.h"
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -72,129 +72,81 @@ class SpinLock {
   std::atomic<bool> locked_{false};
 };
 
-// Producer-consumer buffer between search workers and the batch evaluator.
-// Workers block in Evaluate() until their batch has been run. A batch is sent
-// when `batch_size` positions are queued, when every active worker is
-// waiting, or when the oldest request has waited `timeout`.
-class InferenceQueue {
+// Joins its threads on destruction, including during stack unwinding.
+class ThreadGroup {
  public:
-  InferenceQueue(PolicyValueEvaluator& evaluator, int batch_size,
-                 std::chrono::microseconds timeout, int num_workers)
-      : evaluator_(evaluator),
-        batch_size_(static_cast<size_t>(batch_size)),
-        timeout_(timeout),
-        active_workers_(num_workers) {}
+  explicit ThreadGroup(size_t capacity) { threads_.reserve(capacity); }
 
-  // Queues `position` and blocks until it has been evaluated. Rethrows the
-  // evaluator's error if any batch has failed.
-  Evaluation Evaluate(const GamePosition& position) {
-    std::unique_lock lock(mutex_);
-    if (error_) std::rethrow_exception(error_);
+  ThreadGroup(const ThreadGroup&) = delete;
+  ThreadGroup& operator=(const ThreadGroup&) = delete;
 
-    Request request{position, {}, Clock::now(), false};
-    pending_.push_back(&request);
-    evaluator_cv_.notify_one();
-    worker_cv_.wait(lock, [&] { return request.done; });
-
-    if (error_) std::rethrow_exception(error_);
-    return request.result;
+  ~ThreadGroup() {
+    for (std::thread& thread : threads_) thread.join();
   }
 
-  // Called once by each worker when it will submit no more requests.
-  void WorkerFinished() {
-    std::lock_guard lock(mutex_);
-    --active_workers_;
-    evaluator_cv_.notify_one();
+  template <typename Function>
+  void Spawn(Function&& function) {
+    threads_.emplace_back(std::forward<Function>(function));
   }
-
-  // Batch evaluator loop. Returns once every worker has finished and the
-  // queue is empty.
-  void Run() {
-    std::unique_lock lock(mutex_);
-    while (true) {
-      evaluator_cv_.wait(
-          lock, [&] { return !pending_.empty() || active_workers_ == 0; });
-      if (pending_.empty()) return;
-
-      evaluator_cv_.wait_until(lock, pending_.front()->enqueued + timeout_,
-                               [&] { return IsBatchReady(); });
-
-      const size_t count = std::min(batch_size_, pending_.size());
-      std::vector<Request*> batch(pending_.begin(), pending_.begin() + count);
-      pending_.erase(pending_.begin(), pending_.begin() + count);
-
-      std::vector<GamePosition> positions;
-      positions.reserve(batch.size());
-      for (const Request* request : batch) {
-        positions.push_back(request->position);
-      }
-
-      lock.unlock();
-      std::vector<Evaluation> results;
-      std::exception_ptr error;
-      ++batches_;
-      batched_positions_ += static_cast<int>(positions.size());
-      try {
-        PhaseTimer timer(&timing_, &SearchTiming::inference_ms);
-        results = evaluator_.EvaluateBatch(positions);
-        if (results.size() != positions.size()) {
-          throw std::runtime_error(
-              "Evaluator returned the wrong number of evaluations");
-        }
-      } catch (...) {
-        error = std::current_exception();
-      }
-      lock.lock();
-
-      if (error && !error_) error_ = error;
-      for (size_t i = 0; i < batch.size(); ++i) {
-        if (!error) batch[i]->result = results[i];
-        batch[i]->done = true;
-      }
-      if (error_) {
-        // Fail every waiting request; later requests fail immediately.
-        for (Request* request : pending_) request->done = true;
-        pending_.clear();
-      }
-      worker_cv_.notify_all();
-    }
-  }
-
-  // Evaluator-side counters; read only after Run() has returned.
-  double inference_ms() const { return timing_.inference_ms; }
-  int batches() const { return batches_; }
-  int batched_positions() const { return batched_positions_; }
 
  private:
-  struct Request {
-    GamePosition position;
-    Evaluation result;
-    Clock::time_point enqueued;
-    bool done;
-  };
-
-  // A batch is ready when full or when no other worker can add to it.
-  bool IsBatchReady() const {
-    return pending_.size() >= batch_size_ ||
-           static_cast<int>(pending_.size()) >= active_workers_;
-  }
-
-  PolicyValueEvaluator& evaluator_;
-  const size_t batch_size_;
-  const std::chrono::microseconds timeout_;
-
-  std::mutex mutex_;
-  std::condition_variable evaluator_cv_;
-  std::condition_variable worker_cv_;
-  std::deque<Request*> pending_;
-  int active_workers_;
-  std::exception_ptr error_;
-
-  // Touched only by the evaluator thread.
-  SearchTiming timing_;
-  int batches_ = 0;
-  int batched_positions_ = 0;
+  std::vector<std::thread> threads_;
 };
+
+// A validation rule for SearchOptions: the check, the message shown when it
+// fails, and the field reset to its default to repair it.
+struct OptionRule {
+  bool (*holds)(const SearchOptions&);
+  const char* message;
+  void (*reset)(SearchOptions&);
+};
+
+template <auto Field>
+void ResetField(SearchOptions& options) {
+  options.*Field = SearchOptions{}.*Field;
+}
+
+// Cross-field rules come last so Sanitized() checks them after every field
+// has its own valid value.
+const OptionRule kOptionRules[] = {
+    {[](const SearchOptions& o) { return o.num_playouts > 0; },
+     "num_playouts must be > 0", ResetField<&SearchOptions::num_playouts>},
+    {[](const SearchOptions& o) { return o.think_time_ms > 0; },
+     "think_time_ms must be > 0", ResetField<&SearchOptions::think_time_ms>},
+    {[](const SearchOptions& o) {
+       return std::isfinite(o.c_puct) && o.c_puct > 0.0f;
+     },
+     "c_puct must be > 0", ResetField<&SearchOptions::c_puct>},
+    {[](const SearchOptions& o) {
+       return std::isfinite(o.temperature) && o.temperature >= 0.0f;
+     },
+     "temperature must be >= 0", ResetField<&SearchOptions::temperature>},
+    {[](const SearchOptions& o) {
+       return o.num_sampling_moves >= 0 &&
+              o.num_sampling_moves <= kActionCount;
+     },
+     "num_sampling_moves must be in 0..225",
+     ResetField<&SearchOptions::num_sampling_moves>},
+    {[](const SearchOptions& o) {
+       return std::isfinite(o.virtual_loss) && o.virtual_loss > 0.0f;
+     },
+     "virtual_loss must be > 0", ResetField<&SearchOptions::virtual_loss>},
+    {[](const SearchOptions& o) {
+       return o.num_threads > 0 && o.num_threads <= SearchOptions::kMaxThreads;
+     },
+     "num_threads must be in 1..64", ResetField<&SearchOptions::num_threads>},
+    {[](const SearchOptions& o) { return o.batch_timeout_us > 0; },
+     "batch_timeout_us must be > 0",
+     ResetField<&SearchOptions::batch_timeout_us>},
+    {[](const SearchOptions& o) {
+       return o.batch_size > 0 && o.batch_size <= o.num_threads;
+     },
+     "batch_size must be in 1..num_threads",
+     ResetField<&SearchOptions::batch_size>},
+};
+
+static_assert(kActionCount == 225 && SearchOptions::kMaxThreads == 64,
+              "Update the option rule messages");
 
 }  // namespace
 
@@ -237,11 +189,11 @@ struct MCTS::TreeNode {
 class MCTS::Worker {
  public:
   Worker(const SearchOptions& options, TreeNode& root,
-         const GamePosition& position, InferenceQueue& queue)
-      : options_(options), root_(root), position_(position), queue_(queue) {}
+         const GamePosition& position)
+      : options_(options), root_(root), position_(position) {}
 
   // Runs one simulation: select, evaluate, expand, and back up.
-  void Playout() {
+  void Playout(InferenceQueue::Client& queue) {
     GamePosition position = position_;
     path_.clear();
 
@@ -283,7 +235,7 @@ class MCTS::Worker {
       Evaluation evaluation;
       {
         PhaseTimer timer(&timing_, &SearchTiming::evaluation_ms);
-        evaluation = queue_.Evaluate(position);
+        evaluation = queue.Evaluate(position);
       }
       leaf_value = evaluation.value;
 
@@ -391,7 +343,6 @@ class MCTS::Worker {
   const SearchOptions& options_;
   TreeNode& root_;
   const GamePosition& position_;
-  InferenceQueue& queue_;
   SearchTiming timing_;
   std::vector<TreeNode*> path_;
 };
@@ -400,23 +351,21 @@ class MCTS::Worker {
 // MCTS
 // ---------------------------------------------------------------------------
 
-bool SearchOptions::HasValidFields() const {
-  return std::isfinite(c_puct) && c_puct > 0.0f && num_playouts > 0 &&
-         std::isfinite(temperature) && temperature >= 0.0f &&
-         num_sampling_moves >= 0 && num_sampling_moves <= kActionCount &&
-         (search_limit == SearchLimit::kPlayouts ||
-          search_limit == SearchLimit::kThinkTime) &&
-         think_time_ms > 0 && think_time_ms <= kMaxThinkTimeMs &&
-         (parallel_mode == ParallelMode::kNone ||
-          parallel_mode == ParallelMode::kVirtualLoss ||
-          parallel_mode == ParallelMode::kWuPuct) &&
-         std::isfinite(virtual_loss) && virtual_loss > 0.0f &&
-         num_threads > 0 && num_threads <= kMaxThreads && batch_size > 0 &&
-         batch_timeout_us > 0 && batch_timeout_us <= kMaxBatchTimeoutUs;
+std::vector<std::string> SearchOptions::Validate() const {
+  std::vector<std::string> violations;
+  for (const OptionRule& rule : kOptionRules) {
+    if (!rule.holds(*this)) violations.emplace_back(rule.message);
+  }
+  return violations;
 }
 
-bool SearchOptions::IsValid() const {
-  return HasValidFields() && batch_size <= num_threads;
+SearchOptions SearchOptions::Sanitized() const {
+  SearchOptions options = *this;
+  for (const OptionRule& rule : kOptionRules) {
+    if (!rule.holds(options)) rule.reset(options);
+  }
+  assert(options.IsValid());
+  return options;
 }
 
 MCTS::MCTS(SearchOptions options) : options_(options) {
@@ -437,13 +386,17 @@ std::vector<MoveVisits> MCTS::Search(const GamePosition& position,
 
   const int num_workers = options_.num_threads;
   InferenceQueue queue(evaluator, options_.batch_size,
-                       std::chrono::microseconds(options_.batch_timeout_us),
-                       num_workers);
+                       std::chrono::microseconds(options_.batch_timeout_us));
 
-  std::vector<std::unique_ptr<Worker>> workers;
+  // Connect every client before any worker starts so the first batch waits
+  // for all of them.
+  std::vector<Worker> workers;
+  std::vector<InferenceQueue::Client> clients;
+  workers.reserve(num_workers);
+  clients.reserve(num_workers);
   for (int i = 0; i < num_workers; ++i) {
-    workers.push_back(
-        std::make_unique<Worker>(options_, *root_, position, queue));
+    workers.emplace_back(options_, *root_, position);
+    clients.push_back(queue.Connect());
   }
 
   // Search budget shared by all workers.
@@ -462,38 +415,24 @@ std::vector<MoveVisits> MCTS::Search(const GamePosition& position,
 
   std::mutex error_mutex;
   std::exception_ptr first_error;
-  const auto record_error = [&](std::exception_ptr error) {
-    std::lock_guard lock(error_mutex);
-    if (!first_error) first_error = error;
-    stop.store(true, std::memory_order_relaxed);
-  };
 
-  std::vector<std::thread> threads;
-  threads.reserve(num_workers + 1);
-  int started = 0;
-  try {
-    threads.emplace_back([&queue] { queue.Run(); });
-    for (; started < num_workers; ++started) {
-      threads.emplace_back([&, worker = workers[started].get()] {
+  {
+    ThreadGroup threads(num_workers);
+    for (int i = 0; i < num_workers; ++i) {
+      // Each thread owns its client, so the queue stops waiting for a worker
+      // as soon as that worker's thread ends.
+      threads.Spawn([&, worker = &workers[i],
+                     client = std::move(clients[i])]() mutable {
         try {
-          while (claim_playout()) worker->Playout();
+          while (claim_playout()) worker->Playout(client);
         } catch (...) {
-          record_error(std::current_exception());
+          std::lock_guard lock(error_mutex);
+          if (!first_error) first_error = std::current_exception();
+          stop.store(true, std::memory_order_relaxed);
         }
-        queue.WorkerFinished();
       });
     }
-  } catch (...) {
-    // Thread creation failed: release the evaluator from waiting on workers
-    // that never started, then join whatever is running.
-    record_error(std::current_exception());
-    if (threads.empty()) {
-      Reset();
-      std::rethrow_exception(first_error);
-    }
-    for (int i = started; i < num_workers; ++i) queue.WorkerFinished();
   }
-  for (std::thread& thread : threads) thread.join();
 
   if (first_error) {
     // Interrupted playouts leave pre-updates behind, so drop the tree.
@@ -503,17 +442,11 @@ std::vector<MoveVisits> MCTS::Search(const GamePosition& position,
   assert(CountInFlight() == 0);
 
   if (timing) {
-    for (const auto& worker : workers) {
-      timing->selection_ms += worker->timing().selection_ms;
-      timing->expansion_ms += worker->timing().expansion_ms;
-      timing->evaluation_ms += worker->timing().evaluation_ms;
-      timing->backup_ms += worker->timing().backup_ms;
-      timing->playouts += worker->timing().playouts;
-      timing->collisions += worker->timing().collisions;
-    }
-    timing->inference_ms = queue.inference_ms();
-    timing->batches = queue.batches();
-    timing->batched_positions = queue.batched_positions();
+    for (const Worker& worker : workers) *timing += worker.timing();
+    const InferenceQueue::Stats stats = queue.stats();
+    timing->inference_ms = stats.inference_ms;
+    timing->batches = stats.batches;
+    timing->batched_positions = stats.batched_positions;
   }
 
   std::vector<MoveVisits> move_stats;

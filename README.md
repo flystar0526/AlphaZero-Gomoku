@@ -88,7 +88,7 @@ progress to the terminal:
 
 | File | Contents |
 |---|---|
-| `moves.csv` | Game and move numbers, AI identity, color, zero-based coordinates, total thinking time, Selection / Expansion / Evaluation / Inference / Backup times, completed playouts, inference batches, mean batch size, and leaf collisions |
+| `moves.csv` | Game and move numbers, AI identity, color, zero-based coordinates, total thinking time, Selection / Expansion / Evaluation / Inference / Backup times, completed playouts, inference batches, batched positions, and leaf collisions |
 | `games.csv` | Black and White AI identities, winner identity and color, move count, and game duration; a draw has an empty winner identity |
 | `summary.txt` | Run status, requested/completed games, model path, AI settings, overall Black/White wins and win rates, and each AI's results, timing, and search counters by color and in total |
 
@@ -106,10 +106,11 @@ leaves skip Evaluation and Expansion. Thread start-up and final move selection
 also contribute to total thinking time.
 
 `playouts` counts completed simulations, `batches` counts model calls, and
-`mean_batch_size` is the positions sent divided by `batches` (`N/A` when no
-batch ran). `collisions` counts leaves that another worker expanded first; the
-worker discards its own expansion and only backs up its value. The `[search]`
-summary section reports totals and per-move means of these counters.
+`batched_positions` counts the positions sent in them. `collisions` counts
+leaves that another worker expanded first; the worker discards its own
+expansion and only backs up its value. The `[search]` summary section reports
+the total and per-move mean of each counter, plus `mean_batch_size`
+(`batched_positions / batches`, `N/A` when no batch ran).
 Model initialization, logging, and synchronizing trees after a move are outside
 `think_ms`. Game duration includes move processing, tree synchronization, and
 writing move rows, but excludes model initialization and summary writing.
@@ -171,14 +172,14 @@ With one worker, no pre-update is visible during its own selection, so all three
 |---|---|---|
 | `search_limit` | `playouts` | `playouts` or `think_time` |
 | `num_playouts` | 400 | > 0 |
-| `think_time_ms` | 1000 | 1–60000 |
+| `think_time_ms` | 1000 | > 0 |
 | `parallel_mode` | `none` | `none`, `virtual_loss`, or `wu_puct` |
 | `virtual_loss` | 1 | finite and > 0 |
 | `num_threads` | 1 | 1–64 |
 | `batch_size` | 1 | 1–`num_threads` |
-| `batch_timeout_us` | 1000 | 1–1000000 |
+| `batch_timeout_us` | 1000 | > 0 |
 
-Settings shows `num_playouts` or `think_time_ms` for the selected search limit and `virtual_loss` only in Virtual Loss mode; hidden values are kept and saved. If the model fails during a search, the search tree is reset and the error is reported.
+Settings shows `num_playouts` or `think_time_ms` for the selected search limit and `virtual_loss` only in Virtual Loss mode; hidden values are kept and saved. Each broken rule is listed under the settings, and saving is disabled until all are fixed. If the model fails during a search, the search tree is reset and the error is reported.
 
 ### Move Sampling
 
@@ -188,7 +189,7 @@ Set either parameter to `0` to select the most visited move throughout the game.
 
 AI Player 1 and AI Player 2 have independent settings identified separately from stone colors. **Player vs AI** uses AI Player 1, which plays White. **AI vs AI** currently assigns AI Player 1 to Black and AI Player 2 to White; a color-swap control is not yet provided.
 
-Configuration keys use the prefixes `ai_player_1_` and `ai_player_2_`, followed by `num_playouts`, `c_puct`, `temperature`, `num_sampling_moves`, or one of the parallel search keys above (for example, `ai_player_1_temperature`). Missing or invalid keys use their defaults: 400 playouts, `c_puct = 5`, `temperature = 1`, and `num_sampling_moves = 30`. The `batch_size <= num_threads` constraint is checked after the whole file is read, so key order does not matter; a violation resets `batch_size` to 1. Old `black_ai_*` and `white_ai_*` keys are ignored; saving settings writes only the new keys.
+Configuration keys use the prefixes `ai_player_1_` and `ai_player_2_`, followed by `num_playouts`, `c_puct`, `temperature`, `num_sampling_moves`, or one of the parallel search keys above (for example, `ai_player_1_temperature`). Missing or invalid keys use their defaults: 400 playouts, `c_puct = 5`, `temperature = 1`, and `num_sampling_moves = 30`. Range rules, including `batch_size <= num_threads`, are checked after the whole file is read, so key order does not matter; each field that breaks a rule is reset to its default. Old `black_ai_*` and `white_ai_*` keys are ignored; saving settings writes only the new keys.
 
 Each AI has an independently seeded random engine, so different games can produce different move sequences, though distinct game records are not guaranteed.
 

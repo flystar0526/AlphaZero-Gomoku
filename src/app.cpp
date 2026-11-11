@@ -610,12 +610,9 @@ void App::DrawSettings() {
       "Set temperature or num_sampling_moves to 0 to disable sampling.");
 
   // One column per AI player so both fit without scrolling.
-  static constexpr const char* kSearchLimits[] = {"Playouts", "Think time"};
-  static constexpr const char* kParallelModes[] = {"None", "Virtual Loss",
-                                                   "WU-PUCT"};
   constexpr float kInputWidth = 150.0f;
 
-  bool valid_ai_options = true;
+  std::vector<std::string> violations;
   if (ImGui::BeginTable("ai_players", 2)) {
     for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
       ImGui::TableNextColumn();
@@ -627,8 +624,8 @@ void App::DrawSettings() {
       auto& options = settings_ai_options_[static_cast<size_t>(player)];
       int search_limit = static_cast<int>(options.search_limit);
       ImGui::SetNextItemWidth(kInputWidth);
-      if (ImGui::Combo("search_limit", &search_limit, kSearchLimits,
-                       IM_ARRAYSIZE(kSearchLimits))) {
+      if (ImGui::Combo("search_limit", &search_limit, kSearchLimitNames,
+                       IM_ARRAYSIZE(kSearchLimitNames))) {
         options.search_limit = static_cast<SearchLimit>(search_limit);
       }
       ImGui::SetNextItemWidth(kInputWidth);
@@ -648,8 +645,8 @@ void App::DrawSettings() {
       ImGui::Spacing();
       int parallel_mode = static_cast<int>(options.parallel_mode);
       ImGui::SetNextItemWidth(kInputWidth);
-      if (ImGui::Combo("parallel_mode", &parallel_mode, kParallelModes,
-                       IM_ARRAYSIZE(kParallelModes))) {
+      if (ImGui::Combo("parallel_mode", &parallel_mode, kParallelModeNames,
+                       IM_ARRAYSIZE(kParallelModeNames))) {
         options.parallel_mode = static_cast<ParallelMode>(parallel_mode);
       }
       if (options.parallel_mode == ParallelMode::kVirtualLoss) {
@@ -665,23 +662,20 @@ void App::DrawSettings() {
       ImGui::InputInt("batch_timeout_us", &options.batch_timeout_us, 100,
                       1000);
 
-      valid_ai_options = valid_ai_options && options.IsValid();
+      for (const std::string& violation : options.Validate()) {
+        violations.push_back(std::string(name) + ": " + violation);
+      }
       ImGui::PopID();
     }
     ImGui::EndTable();
   }
 
-  if (!valid_ai_options) {
-    ImGui::PushStyleColor(ImGuiCol_Text, {1.0f, 0.25f, 0.25f, 1.0f});
-    ImGui::TextWrapped(
-        "Requires num_playouts > 0, think_time_ms in 1..%d, c_puct > 0, "
-        "temperature >= 0, num_sampling_moves in 0..%d, virtual_loss > 0, "
-        "num_threads in 1..%d, batch_size in 1..num_threads, and "
-        "batch_timeout_us in 1..%d.",
-        SearchOptions::kMaxThinkTimeMs, kActionCount,
-        SearchOptions::kMaxThreads, SearchOptions::kMaxBatchTimeoutUs);
-    ImGui::PopStyleColor();
+  const bool valid_ai_options = violations.empty();
+  ImGui::PushStyleColor(ImGuiCol_Text, {1.0f, 0.25f, 0.25f, 1.0f});
+  for (const std::string& violation : violations) {
+    ImGui::TextWrapped("%s", violation.c_str());
   }
+  ImGui::PopStyleColor();
 
   ImGui::Spacing();
   ImGui::Separator();

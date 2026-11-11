@@ -18,27 +18,6 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// Per-move durations in ms: wall-clock think time followed by the MCTS phases
-// (summed over workers) and the batch evaluator's inference time.
-using Durations = std::array<double, 6>;
-constexpr std::array<const char*, 6> kTimingNames = {
-    "think", "selection", "expansion", "evaluation", "inference", "backup"};
-
-// Per-move search counters.
-struct Counters {
-  std::int64_t playouts = 0;
-  std::int64_t batches = 0;
-  std::int64_t batched_positions = 0;
-  std::int64_t collisions = 0;
-
-  void Merge(const Counters& other) {
-    playouts += other.playouts;
-    batches += other.batches;
-    batched_positions += other.batched_positions;
-    collisions += other.collisions;
-  }
-};
-
 constexpr std::array<Player, 2> kColors = {Player::kBlack, Player::kWhite};
 
 size_t Index(Player color) { return static_cast<size_t>(color); }
@@ -59,23 +38,27 @@ double Milliseconds(Clock::duration elapsed) {
 // Statistics
 // ---------------------------------------------------------------------------
 
+// Per-move timing and search counters. Durations are the wall-clock think
+// time plus the SearchTiming phases (summed over workers).
 struct TimingStatistics {
   std::int64_t moves = 0;
-  Durations total{};
-  Durations maximum{};
-  Counters counters;
+  double think_total_ms = 0.0;
+  double think_max_ms = 0.0;
+  SearchTiming total;
+  SearchTiming maximum;  // Only the duration fields are maxima.
 
-  void Add(const Durations& durations, const Counters& move_counters) {
-    Merge({1, durations, durations, move_counters});
+  void Add(double think_ms, const SearchTiming& search) {
+    Merge({1, think_ms, think_ms, search, search});
   }
 
   void Merge(const TimingStatistics& other) {
     moves += other.moves;
-    for (size_t i = 0; i < total.size(); ++i) {
-      total[i] += other.total[i];
-      maximum[i] = std::max(maximum[i], other.maximum[i]);
-    }
-    counters.Merge(other.counters);
+    think_total_ms += other.think_total_ms;
+    think_max_ms = std::max(think_max_ms, other.think_max_ms);
+    total += other.total;
+    SearchTiming::ForEachDuration([&](const char*, auto field) {
+      maximum.*field = std::max(maximum.*field, other.maximum.*field);
+    });
   }
 };
 
@@ -177,6 +160,16 @@ std::ofstream OpenLog(const std::filesystem::path& path) {
   return out;
 }
 
+std::string MovesHeader() {
+  std::string header = "game,move,player_id,color,row,col,think_ms";
+  SearchTiming::ForEachDuration([&](const char* name, auto) {
+    header += std::string(",") + name + "_ms";
+  });
+  SearchTiming::ForEachCounter(
+      [&](const char* name, auto) { header += std::string(",") + name; });
+  return header;
+}
+
 // Writes numerator / denominator, or N/A when the denominator is zero.
 void WriteRatio(std::ostream& out, double numerator, double denominator) {
   if (denominator == 0.0) {
@@ -204,28 +197,45 @@ void WritePlayerStatistics(std::ostream& out, size_t player, const char* color,
 
 void WriteTimingStatistics(std::ostream& out, size_t player, const char* color,
                            const TimingStatistics& stats) {
-  for (size_t i = 0; i < kTimingNames.size(); ++i) {
-    out << player + 1 << ',' << color << ',' << stats.moves << ','
-        << kTimingNames[i] << ',' << stats.total[i] << ',';
+  const auto write_row = [&](const char* metric, double total,
+                             double maximum) {
+    out << player + 1 << ',' << color << ',' << stats.moves << ',' << metric
+        << ',' << total << ',';
+    WriteRatio(out, total, static_cast<double>(stats.moves));
+    out << ',';
     if (stats.moves == 0) {
-      out << "N/A,N/A\n";
+      out << "N/A";
     } else {
-      out << stats.total[i] / stats.moves << ',' << stats.maximum[i] << '\n';
+      out << maximum;
     }
-  }
+    out << '\n';
+  };
+
+  write_row("think", stats.think_total_ms, stats.think_max_ms);
+  SearchTiming::ForEachDuration([&](const char* name, auto field) {
+    write_row(name, stats.total.*field, stats.maximum.*field);
+  });
+}
+
+std::string SearchStatisticsHeader() {
+  std::string header = "player_id,color,moves";
+  SearchTiming::ForEachCounter([&](const char* name, auto) {
+    header += std::string(",total_") + name + ",mean_" + name;
+  });
+  return header + ",mean_batch_size";
 }
 
 void WriteSearchStatistics(std::ostream& out, size_t player, const char* color,
                            const TimingStatistics& stats) {
-  const Counters& counters = stats.counters;
-  const double moves = static_cast<double>(stats.moves);
-  out << player + 1 << ',' << color << ',' << stats.moves << ','
-      << counters.playouts << ',';
-  WriteRatio(out, counters.playouts, moves);
-  out << ',' << counters.batches << ',';
-  WriteRatio(out, counters.batched_positions, counters.batches);
-  out << ',' << counters.collisions << ',';
-  WriteRatio(out, counters.collisions, moves);
+  out << player + 1 << ',' << color << ',' << stats.moves;
+  SearchTiming::ForEachCounter([&](const char*, auto field) {
+    out << ',' << stats.total.*field << ',';
+    WriteRatio(out, static_cast<double>(stats.total.*field),
+               static_cast<double>(stats.moves));
+  });
+  out << ',';
+  WriteRatio(out, static_cast<double>(stats.total.batched_positions),
+             static_cast<double>(stats.total.batches));
   out << '\n';
 }
 
@@ -278,8 +288,7 @@ void WriteSummary(const std::filesystem::path& directory,
                           PlayerTotal(stats, player).timing);
   }
 
-  out << "\n[search]\nplayer_id,color,moves,total_playouts,mean_playouts,"
-         "total_batches,mean_batch_size,total_collisions,mean_collisions\n";
+  out << "\n[search]\n" << SearchStatisticsHeader() << '\n';
   for (size_t player = 0; player < stats.size(); ++player) {
     for (Player color : kColors) {
       WriteSearchStatistics(out, player, ColorName(color),
@@ -337,25 +346,21 @@ GameResult PlayGame(int game_number, Match& match, std::ostream& moves) {
     SearchTiming timing;
     const auto start = Clock::now();
     const auto action = match.Think(&timing);
-    const Durations durations = {Milliseconds(Clock::now() - start),
-                                 timing.selection_ms, timing.expansion_ms,
-                                 timing.evaluation_ms, timing.inference_ms,
-                                 timing.backup_ms};
-    const Counters counters = {timing.playouts, timing.batches,
-                               timing.batched_positions, timing.collisions};
+    const double think_ms = Milliseconds(Clock::now() - start);
 
     if (!action || !match.Play(*action)) {
       throw std::runtime_error("AI returned no legal move");
     }
-    result.timing[player].Add(durations, counters);
+    result.timing[player].Add(think_ms, timing);
 
     moves << game_number << ',' << move_number << ',' << player + 1 << ','
           << ColorName(color) << ',' << ActionRow(*action) << ','
-          << ActionCol(*action);
-    for (double duration : durations) moves << ',' << duration;
-    moves << ',' << counters.playouts << ',' << counters.batches << ',';
-    WriteRatio(moves, counters.batched_positions, counters.batches);
-    moves << ',' << counters.collisions << '\n';
+          << ActionCol(*action) << ',' << think_ms;
+    SearchTiming::ForEachDuration(
+        [&](const char*, auto field) { moves << ',' << timing.*field; });
+    SearchTiming::ForEachCounter(
+        [&](const char*, auto field) { moves << ',' << timing.*field; });
+    moves << '\n';
   }
 
   result.duration_ms = Milliseconds(Clock::now() - game_start);
@@ -385,9 +390,7 @@ std::filesystem::path RunSimulation(
 
     auto moves = OpenLog(directory / "moves.csv");
     auto games = OpenLog(directory / "games.csv");
-    moves << "game,move,player_id,color,row,col,think_ms,selection_ms,"
-             "expansion_ms,evaluation_ms,inference_ms,backup_ms,playouts,"
-             "batches,mean_batch_size,collisions\n";
+    moves << MovesHeader() << '\n';
     games << "game,black_player_id,white_player_id,winner_player_id,"
              "winner_color,total_moves,duration_ms\n";
     moves.flush();

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "game_position.h"
@@ -19,11 +21,15 @@ enum class SearchLimit {
   kThinkTime,  // Stop dispatching simulations after `think_time_ms`.
 };
 
+// Names of each enum value, indexed by value. Used by both gomoku.cfg and the
+// Settings window.
+inline constexpr const char* kParallelModeNames[] = {"none", "virtual_loss",
+                                                     "wu_puct"};
+inline constexpr const char* kSearchLimitNames[] = {"playouts", "think_time"};
+
 // Hyperparameters for MCTS search and move sampling.
 struct SearchOptions {
   static constexpr int kMaxThreads = 64;
-  static constexpr int kMaxBatchTimeoutUs = 1'000'000;
-  static constexpr int kMaxThinkTimeMs = 60'000;
 
   float c_puct = 5.0f;
   int num_playouts = 400;
@@ -37,11 +43,13 @@ struct SearchOptions {
   int batch_size = 1;
   int batch_timeout_us = 1000;
 
-  // Checks each field's own range, ignoring cross-field constraints.
-  bool HasValidFields() const;
+  // Returns one message per violated rule, or nothing when valid.
+  std::vector<std::string> Validate() const;
 
-  // Checks every field and requires batch_size <= num_threads.
-  bool IsValid() const;
+  bool IsValid() const { return Validate().empty(); }
+
+  // Returns a copy with every field that breaks a rule reset to its default.
+  SearchOptions Sanitized() const;
 };
 
 // Search statistics for a candidate move at the root.
@@ -59,12 +67,40 @@ struct SearchTiming {
   double selection_ms = 0.0;
   double expansion_ms = 0.0;
   double evaluation_ms = 0.0;  // Waiting for a batch result, incl. queueing.
+  double inference_ms = 0.0;   // Batch evaluator time spent in EvaluateBatch.
   double backup_ms = 0.0;
-  double inference_ms = 0.0;  // Batch evaluator time spent in EvaluateBatch.
-  int playouts = 0;           // Completed simulations.
-  int batches = 0;            // EvaluateBatch calls.
-  int batched_positions = 0;  // Positions sent over all batches.
-  int collisions = 0;         // Leaves already expanded by another worker.
+  std::int64_t playouts = 0;           // Completed simulations.
+  std::int64_t batches = 0;            // EvaluateBatch calls.
+  std::int64_t batched_positions = 0;  // Positions sent over all batches.
+  std::int64_t collisions = 0;  // Leaves already expanded by another worker.
+
+  // Visits each duration field with its name (without the `_ms` suffix).
+  template <typename Visitor>
+  static void ForEachDuration(Visitor&& visit) {
+    visit("selection", &SearchTiming::selection_ms);
+    visit("expansion", &SearchTiming::expansion_ms);
+    visit("evaluation", &SearchTiming::evaluation_ms);
+    visit("inference", &SearchTiming::inference_ms);
+    visit("backup", &SearchTiming::backup_ms);
+  }
+
+  // Visits each counter field with its name.
+  template <typename Visitor>
+  static void ForEachCounter(Visitor&& visit) {
+    visit("playouts", &SearchTiming::playouts);
+    visit("batches", &SearchTiming::batches);
+    visit("batched_positions", &SearchTiming::batched_positions);
+    visit("collisions", &SearchTiming::collisions);
+  }
+
+  SearchTiming& operator+=(const SearchTiming& other) {
+    const auto add = [&](const char*, auto field) {
+      this->*field += other.*field;
+    };
+    ForEachDuration(add);
+    ForEachCounter(add);
+    return *this;
+  }
 };
 
 // Monte Carlo Tree Search engine with subtree reuse.

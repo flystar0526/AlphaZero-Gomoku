@@ -19,6 +19,7 @@
 #include "ai_player.h"
 #include "file_manager.h"
 #include "game.h"
+#include "inference_queue.h"
 #include "match.h"
 #include "policy_value_network.h"
 #include "replay_controller.h"
@@ -415,9 +416,6 @@ void AIConfiguration() {
         SearchOptions{5.0f, 1, 1.0f, -1},
         SearchOptions{5.0f, 1, 1.0f, kActionCount + 1}}) {
     CHECK(!invalid.IsValid());
-    CheckThrows<std::invalid_argument>([&] {
-      restored.set_ai_options(AIPlayerId::kPlayer1, invalid);
-    });
     CheckThrows<std::invalid_argument>([&] { MCTS search(invalid); });
     CHECK(restored.ai_options(AIPlayerId::kPlayer1).num_playouts == 7);
     CHECK(restored.ai_options(AIPlayerId::kPlayer1).c_puct == 1.2345678f);
@@ -518,8 +516,8 @@ void ParallelSearchConfiguration() {
   second.parallel_mode = ParallelMode::kWuPuct;
   second.num_threads = SearchOptions::kMaxThreads;
   second.batch_size = 4;
-  second.think_time_ms = SearchOptions::kMaxThinkTimeMs;
-  second.batch_timeout_us = SearchOptions::kMaxBatchTimeoutUs;
+  second.think_time_ms = 120'000;
+  second.batch_timeout_us = 2'000'000;
 
   defaults.set_ai_options(AIPlayerId::kPlayer1, first);
   defaults.set_ai_options(AIPlayerId::kPlayer2, second);
@@ -558,7 +556,7 @@ void ParallelSearchConfiguration() {
     file << "ai_player_1_parallel_mode = virtual-loss\n"
          << "ai_player_1_search_limit = time\n"
          << "ai_player_1_num_threads = 65\n"
-         << "ai_player_1_think_time_ms = 60001\n"
+         << "ai_player_1_think_time_ms = -5\n"
          << "ai_player_1_batch_timeout_us = 0\n"
          << "ai_player_1_virtual_loss = 0\n"
          << "ai_player_2_virtual_loss = nan\n"
@@ -594,12 +592,43 @@ void ParallelSearchConfiguration() {
   SearchOptions too_large_batch;
   too_large_batch.num_threads = 2;
   too_large_batch.batch_size = 3;
-  CHECK(too_large_batch.HasValidFields());
-  CHECK(!too_large_batch.IsValid());
-  CheckThrows<std::invalid_argument>([&] {
-    ordered.set_ai_options(AIPlayerId::kPlayer1, too_large_batch);
-  });
+  CHECK(too_large_batch.Validate() ==
+        std::vector<std::string>({"batch_size must be in 1..num_threads"}));
   CheckThrows<std::invalid_argument>([&] { MCTS search(too_large_batch); });
+}
+
+void SearchOptionsValidation() {
+  CHECK(SearchOptions{}.Validate().empty());
+
+  SearchOptions invalid;
+  invalid.num_playouts = 0;
+  invalid.c_puct = std::numeric_limits<float>::quiet_NaN();
+  invalid.num_threads = SearchOptions::kMaxThreads + 1;
+  invalid.batch_size = SearchOptions::kMaxThreads + 2;
+  invalid.batch_timeout_us = 0;
+  CHECK(invalid.Validate() ==
+        std::vector<std::string>({"num_playouts must be > 0",
+                                  "c_puct must be > 0",
+                                  "num_threads must be in 1..64",
+                                  "batch_timeout_us must be > 0",
+                                  "batch_size must be in 1..num_threads"}));
+
+  // Each broken field returns to its default; num_threads is reset before
+  // batch_size is checked against it.
+  invalid.temperature = 0.5f;
+  const SearchOptions sanitized = invalid.Sanitized();
+  CHECK(sanitized.IsValid());
+  CHECK(sanitized.num_playouts == 400);
+  CHECK(Near(sanitized.c_puct, 5.0f));
+  CHECK(sanitized.num_threads == 1);
+  CHECK(sanitized.batch_size == 1);
+  CHECK(sanitized.batch_timeout_us == 1000);
+  CHECK(Near(sanitized.temperature, 0.5f));
+
+  SearchOptions valid_batch;
+  valid_batch.num_threads = 4;
+  valid_batch.batch_size = 4;
+  CHECK(valid_batch.Sanitized().batch_size == 4);
 }
 
 void SavedGameFiles() {
@@ -978,7 +1007,7 @@ void ParallelSearchSpreadsWorkers() {
   // child; virtual loss and WU-PUCT must spread them over distinct children.
   for (ParallelMode mode : kParallelModes) {
     SearchOptions options = ParallelOptions(mode, 8, 8, 16);
-    options.batch_timeout_us = SearchOptions::kMaxBatchTimeoutUs;
+    options.batch_timeout_us = 1'000'000;
     MCTS search(options);
     BatchRecorder evaluator;
 
@@ -1047,6 +1076,63 @@ void ParallelSearchErrors() {
   const auto moves = search.Search(GamePosition(), evaluator);
   CHECK(TotalVisits(moves) >= 100 - 4);
   CHECK(search.CountInFlight() == 0);
+}
+
+void InferenceQueueBatching() {
+  BatchRecorder evaluator;
+  // A full batch is sent at once, well before the 1 s timeout.
+  {
+    InferenceQueue queue(evaluator, 2, std::chrono::seconds(1));
+    std::vector<InferenceQueue::Client> clients;
+    for (int i = 0; i < 3; ++i) clients.push_back(queue.Connect());
+
+    const auto start = std::chrono::steady_clock::now();
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 2; ++i) {
+      threads.emplace_back([&, client = &clients[i]] {
+        CHECK(Near(client->Evaluate(GamePosition()).value, 0.1f));
+      });
+    }
+    for (std::thread& thread : threads) thread.join();
+    CHECK(std::chrono::steady_clock::now() - start <
+          std::chrono::milliseconds(500));
+    CHECK(evaluator.batches.size() == 1 && evaluator.batches[0].size() == 2);
+
+    // Disconnecting the idle clients lets a lone request go immediately.
+    clients.pop_back();
+    clients.pop_back();
+    clients[0].Evaluate(GamePosition());
+    CHECK(evaluator.batches.size() == 2 && evaluator.batches[1].size() == 1);
+
+    const InferenceQueue::Stats stats = queue.stats();
+    CHECK(stats.batches == 2 && stats.batched_positions == 3);
+    CHECK(stats.inference_ms >= 0.0);
+  }
+
+  // A partial batch is sent once the oldest request times out while another
+  // client stays connected but idle.
+  evaluator.batches.clear();
+  InferenceQueue queue(evaluator, 4, std::chrono::milliseconds(30));
+  InferenceQueue::Client waiting = queue.Connect();
+  InferenceQueue::Client idle = queue.Connect();
+  const auto start = std::chrono::steady_clock::now();
+  waiting.Evaluate(GamePosition());
+  CHECK(std::chrono::steady_clock::now() - start >=
+        std::chrono::milliseconds(30));
+  CHECK(evaluator.batches.size() == 1 && evaluator.batches[0].size() == 1);
+}
+
+void InferenceQueueErrors() {
+  BatchRecorder evaluator;
+  evaluator.fail = true;
+  InferenceQueue queue(evaluator, 1, std::chrono::milliseconds(1));
+  InferenceQueue::Client client = queue.Connect();
+  CheckThrows<std::runtime_error>([&] { client.Evaluate(GamePosition()); });
+
+  // The error sticks: later requests fail without calling the model.
+  evaluator.fail = false;
+  CheckThrows<std::runtime_error>([&] { client.Evaluate(GamePosition()); });
+  CHECK(evaluator.batches.empty());
 }
 
 std::shared_ptr<FakeEvaluator> SamplingEvaluator(const GamePosition& position) {
@@ -1353,6 +1439,7 @@ int main() {
       {"per-player AI configuration", AIConfiguration},
       {"move sampling configuration", MoveSamplingConfiguration},
       {"parallel search configuration", ParallelSearchConfiguration},
+      {"search options validation", SearchOptionsValidation},
       {"saved-game discovery", SavedGameFiles},
       {"save/load validation", FileValidation},
       {"search priors and options", SearchPriorsAndOptions},
@@ -1363,6 +1450,8 @@ int main() {
       {"parallel search spreads workers", ParallelSearchSpreadsWorkers},
       {"think-time search limit", ThinkTimeLimit},
       {"parallel search errors", ParallelSearchErrors},
+      {"inference queue batching", InferenceQueueBatching},
+      {"inference queue errors", InferenceQueueErrors},
       {"move sampling distribution", MoveSamplingDistribution},
       {"move sampling boundaries and undo", MoveSamplingBoundaries},
       {"move sampling edge cases", MoveSamplingEdgeCases},

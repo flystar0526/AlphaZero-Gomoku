@@ -1,11 +1,12 @@
 #include "configuration.h"
 
+#include <cassert>
 #include <cerrno>
 #include <cstdlib>
+#include <exception>
 #include <fstream>
 #include <limits>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -21,9 +22,7 @@ constexpr std::string_view ConfigPrefix(AIPlayerId player) {
   return player == AIPlayerId::kPlayer1 ? "ai_player_1_" : "ai_player_2_";
 }
 
-// Visits each SearchOptions field with its config key name. num_threads is
-// written before batch_size so saved files satisfy batch_size <= num_threads
-// in reading order.
+// Visits each SearchOptions field with its config key name.
 template <typename Visitor>
 void ForEachSearchOption(Visitor&& visit) {
   visit("num_playouts", &SearchOptions::num_playouts);
@@ -39,14 +38,9 @@ void ForEachSearchOption(Visitor&& visit) {
   visit("batch_timeout_us", &SearchOptions::batch_timeout_us);
 }
 
-// Config names for enum options, indexed by enum value.
-constexpr std::string_view kSearchLimitNames[] = {"playouts", "think_time"};
-constexpr std::string_view kParallelModeNames[] = {"none", "virtual_loss",
-                                                   "wu_puct"};
-
 template <typename Enum, size_t N>
 std::optional<Enum> ParseEnum(const std::string& text,
-                              const std::string_view (&names)[N]) {
+                              const char* const (&names)[N]) {
   for (size_t i = 0; i < N; ++i) {
     if (names[i] == text) return static_cast<Enum>(i);
   }
@@ -92,7 +86,8 @@ void WriteValue(std::ostream& out, ParallelMode value) {
   out << kParallelModeNames[static_cast<size_t>(value)];
 }
 
-// Parses a single AI search option, falling back to default if invalid.
+// Parses a single AI search option, falling back to default if unparsable.
+// Range rules are applied once the whole file has been read.
 void ParseSearchOption(std::string_view name, const std::string& text,
                        SearchOptions& options) {
   ForEachSearchOption([&](std::string_view option_name, auto member) {
@@ -100,7 +95,6 @@ void ParseSearchOption(std::string_view name, const std::string& text,
     auto& field = options.*member;
     const auto value = ParseValue(text, &field);
     field = value ? *value : SearchOptions{}.*member;
-    if (!options.HasValidFields()) field = SearchOptions{}.*member;
   });
 }
 
@@ -157,11 +151,7 @@ Configuration::Configuration() {
     }
   }
 
-  // Fields are checked one at a time while reading; resolve the cross-field
-  // batch_size <= num_threads constraint once every line has been read.
-  for (SearchOptions& options : ai_options_) {
-    if (!options.IsValid()) options.batch_size = SearchOptions{}.batch_size;
-  }
+  for (SearchOptions& options : ai_options_) options = options.Sanitized();
 }
 
 void Configuration::Save() const {
@@ -200,9 +190,6 @@ void Configuration::set_time_limit_seconds(int seconds) {
 }
 
 void Configuration::set_ai_options(AIPlayerId player, SearchOptions options) {
-  if (!options.IsValid()) {
-    throw std::invalid_argument(
-        "AI settings require valid search and move sampling options");
-  }
+  assert(options.IsValid());
   ai_options_[static_cast<size_t>(player)] = options;
 }
