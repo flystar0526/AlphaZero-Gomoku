@@ -38,14 +38,13 @@ double Milliseconds(Clock::duration elapsed) {
 // Statistics
 // ---------------------------------------------------------------------------
 
-// Per-move timing and search counters. Durations are the wall-clock think
-// time plus the SearchTiming phases (summed over workers).
+// Accumulated move timings and search metrics.
 struct TimingStatistics {
   std::int64_t moves = 0;
   double think_total_ms = 0.0;
   double think_max_ms = 0.0;
   SearchTiming total;
-  SearchTiming maximum;  // Only the duration fields are maxima.
+  SearchTiming maximum;
 
   void Add(double think_ms, const SearchTiming& search) {
     Merge({1, think_ms, think_ms, search, search});
@@ -56,6 +55,7 @@ struct TimingStatistics {
     think_total_ms += other.think_total_ms;
     think_max_ms = std::max(think_max_ms, other.think_max_ms);
     total += other.total;
+
     SearchTiming::ForEachDuration([&](const char*, auto field) {
       maximum.*field = std::max(maximum.*field, other.maximum.*field);
     });
@@ -165,12 +165,12 @@ std::string MovesHeader() {
   SearchTiming::ForEachDuration([&](const char* name, auto) {
     header += std::string(",") + name + "_ms";
   });
-  SearchTiming::ForEachCounter(
-      [&](const char* name, auto) { header += std::string(",") + name; });
+  SearchTiming::ForEachCounter([&](const char* name, auto) {
+    header += std::string(",") + name;
+  });
   return header;
 }
 
-// Writes numerator / denominator, or N/A when the denominator is zero.
 void WriteRatio(std::ostream& out, double numerator, double denominator) {
   if (denominator == 0.0) {
     out << "N/A";
@@ -228,11 +228,13 @@ std::string SearchStatisticsHeader() {
 void WriteSearchStatistics(std::ostream& out, size_t player, const char* color,
                            const TimingStatistics& stats) {
   out << player + 1 << ',' << color << ',' << stats.moves;
+
   SearchTiming::ForEachCounter([&](const char*, auto field) {
     out << ',' << stats.total.*field << ',';
     WriteRatio(out, static_cast<double>(stats.total.*field),
                static_cast<double>(stats.moves));
   });
+
   out << ',';
   WriteRatio(out, static_cast<double>(stats.total.batched_positions),
              static_cast<double>(stats.total.batches));

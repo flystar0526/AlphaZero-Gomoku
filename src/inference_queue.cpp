@@ -11,6 +11,10 @@ struct InferenceQueue::Request {
   bool done = false;
 };
 
+// ---------------------------------------------------------------------------
+// Lifecycle and client requests
+// ---------------------------------------------------------------------------
+
 InferenceQueue::InferenceQueue(PolicyValueEvaluator& evaluator, int batch_size,
                                std::chrono::microseconds timeout)
     : evaluator_(evaluator),
@@ -24,6 +28,7 @@ InferenceQueue::~InferenceQueue() {
     assert(clients_ == 0 && pending_.empty());
     closing_ = true;
   }
+
   evaluator_cv_.notify_one();
   evaluator_thread_.join();
 }
@@ -46,9 +51,10 @@ Evaluation InferenceQueue::Evaluate(const GamePosition& position) {
   Request request{position, {}, std::chrono::steady_clock::now()};
   pending_.push_back(&request);
   evaluator_cv_.notify_one();
-  client_cv_.wait(lock, [&] { return request.done; });
 
+  client_cv_.wait(lock, [&] { return request.done; });
   if (error_) std::rethrow_exception(error_);
+
   return request.result;
 }
 
@@ -58,7 +64,10 @@ void InferenceQueue::Disconnect() {
   evaluator_cv_.notify_one();
 }
 
-// A batch is ready when full or when no other client can add to it.
+// ---------------------------------------------------------------------------
+// Batch evaluation loop
+// ---------------------------------------------------------------------------
+
 bool InferenceQueue::IsBatchReady() const {
   return pending_.size() >= batch_size_ ||
          static_cast<int>(pending_.size()) >= clients_;
@@ -66,13 +75,16 @@ bool InferenceQueue::IsBatchReady() const {
 
 void InferenceQueue::Run() {
   std::unique_lock lock(mutex_);
+
   while (true) {
+    // Wait for pending requests or queue shutdown.
     evaluator_cv_.wait(lock, [&] { return !pending_.empty() || closing_; });
     if (pending_.empty()) return;
 
     evaluator_cv_.wait_until(lock, pending_.front()->enqueued + timeout_,
                              [&] { return IsBatchReady(); });
 
+    // Pop up to `batch_size_` requests for evaluation.
     const size_t count = std::min(batch_size_, pending_.size());
     std::vector<Request*> batch(pending_.begin(), pending_.begin() + count);
     pending_.erase(pending_.begin(), pending_.begin() + count);
@@ -83,7 +95,9 @@ void InferenceQueue::Run() {
       positions.push_back(request->position);
     }
 
+    // Run model inference without holding the queue lock.
     lock.unlock();
+
     std::vector<Evaluation> results;
     std::exception_ptr error;
     const auto start = std::chrono::steady_clock::now();
@@ -94,23 +108,27 @@ void InferenceQueue::Run() {
       error = std::current_exception();
     }
     const auto elapsed = std::chrono::steady_clock::now() - start;
+
     lock.lock();
 
+    // Update statistics and wake waiting clients.
     stats_.inference_ms +=
         std::chrono::duration<double, std::milli>(elapsed).count();
     ++stats_.batches;
     stats_.batched_positions += static_cast<std::int64_t>(positions.size());
 
     if (error && !error_) error_ = error;
+
     for (size_t i = 0; i < batch.size(); ++i) {
       if (!error) batch[i]->result = results[i];
       batch[i]->done = true;
     }
+
     if (error_) {
-      // Fail every waiting request; later requests fail immediately.
       for (Request* request : pending_) request->done = true;
       pending_.clear();
     }
+
     client_cv_.notify_all();
   }
 }

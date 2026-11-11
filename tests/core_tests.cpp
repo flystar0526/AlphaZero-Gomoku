@@ -512,6 +512,7 @@ void ParallelSearchConfiguration() {
   first.num_threads = 8;
   first.batch_size = 8;
   first.batch_timeout_us = 250;
+
   SearchOptions second;
   second.parallel_mode = ParallelMode::kWuPuct;
   second.num_threads = SearchOptions::kMaxThreads;
@@ -522,6 +523,7 @@ void ParallelSearchConfiguration() {
   defaults.set_ai_options(AIPlayerId::kPlayer1, first);
   defaults.set_ai_options(AIPlayerId::kPlayer2, second);
   defaults.Save();
+
   {
     std::ifstream file("gomoku.cfg");
     const std::string saved{std::istreambuf_iterator<char>(file),
@@ -550,7 +552,7 @@ void ParallelSearchConfiguration() {
     CHECK(actual.batch_timeout_us == expected.batch_timeout_us);
   }
 
-  // Out-of-range or unknown values fall back to the field default.
+  // Invalid or unknown values fall back to field defaults.
   {
     std::ofstream file("gomoku.cfg");
     file << "ai_player_1_parallel_mode = virtual-loss\n"
@@ -564,6 +566,7 @@ void ParallelSearchConfiguration() {
          << "ai_player_2_num_threads = 0\n"
          << "ai_player_2_batch_size = -1\n";
   }
+
   Configuration invalid;
   for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
     const SearchOptions& options = invalid.ai_options(player);
@@ -576,13 +579,13 @@ void ParallelSearchConfiguration() {
     CHECK(options.virtual_loss == 1.0f);
   }
 
-  // batch_size <= num_threads is checked after the whole file is read, so
-  // line order does not matter; a violation resets batch_size only.
+  // Cross-field batch_size <= num_threads validation.
   {
     std::ofstream file("gomoku.cfg");
     file << "ai_player_1_batch_size = 4\nai_player_1_num_threads = 4\n"
          << "ai_player_2_num_threads = 2\nai_player_2_batch_size = 3\n";
   }
+
   Configuration ordered;
   CHECK(ordered.ai_options(AIPlayerId::kPlayer1).num_threads == 4);
   CHECK(ordered.ai_options(AIPlayerId::kPlayer1).batch_size == 4);
@@ -606,6 +609,7 @@ void SearchOptionsValidation() {
   invalid.num_threads = SearchOptions::kMaxThreads + 1;
   invalid.batch_size = SearchOptions::kMaxThreads + 2;
   invalid.batch_timeout_us = 0;
+
   CHECK(invalid.Validate() ==
         std::vector<std::string>({"num_playouts must be > 0",
                                   "c_puct must be > 0",
@@ -613,8 +617,7 @@ void SearchOptionsValidation() {
                                   "batch_timeout_us must be > 0",
                                   "batch_size must be in 1..num_threads"}));
 
-  // Each broken field returns to its default; num_threads is reset before
-  // batch_size is checked against it.
+  // Sanitized() resets only the invalid fields.
   invalid.temperature = 0.5f;
   const SearchOptions sanitized = invalid.Sanitized();
   CHECK(sanitized.IsValid());
@@ -886,7 +889,11 @@ void TreeLifecycleAndAI() {
   CheckThrows<std::invalid_argument>([] { AIPlayer no_model(nullptr); });
 }
 
-// Evaluator that records each batch and can slow down inference.
+// ---------------------------------------------------------------------------
+// Parallel search and inference queue
+// ---------------------------------------------------------------------------
+
+// Test evaluator that records batch sizes and supports artificial delay/failure.
 class BatchRecorder : public PolicyValueEvaluator {
  public:
   std::vector<std::vector<GamePosition>> batches;
@@ -903,8 +910,10 @@ class BatchRecorder : public PolicyValueEvaluator {
   std::vector<Evaluation> EvaluateBatch(
       const std::vector<GamePosition>& positions) override {
     if (fail) throw std::runtime_error("model failed");
+
     batches.push_back(positions);
     if (delay.count() > 0) std::this_thread::sleep_for(delay);
+
     std::vector<Evaluation> results(positions.size());
     for (Evaluation& result : results) {
       result.policy = policy;
@@ -940,17 +949,17 @@ constexpr ParallelMode kParallelModes[] = {
     ParallelMode::kNone, ParallelMode::kVirtualLoss, ParallelMode::kWuPuct};
 
 void SingleWorkerModesAgree() {
-  // With one worker no pre-update is visible during selection, so every
-  // parallel mode must reproduce the same search.
   FakeEvaluator evaluator;
   evaluator.evaluate = [](const GamePosition& position) {
     Evaluation evaluation;
     for (Action action = 0; action < kActionCount; ++action) {
       evaluation.policy[action] = 1.f + static_cast<float>(action % 7);
     }
+
     const float sum = std::accumulate(evaluation.policy.begin(),
                                       evaluation.policy.end(), 0.f);
     for (float& prior : evaluation.policy) prior /= sum;
+
     evaluation.value =
         static_cast<float>(position.board().stone_count() % 5) / 5.f - 0.4f;
     return evaluation;
@@ -961,6 +970,7 @@ void SingleWorkerModesAgree() {
     MCTS search(ParallelOptions(mode, 1, 1, 300));
     results.push_back(search.Search(GamePosition(), evaluator));
   }
+
   for (size_t i = 1; i < results.size(); ++i) {
     CHECK(results[i].size() == results[0].size());
     for (size_t j = 0; j < results[0].size(); ++j) {
@@ -977,12 +987,13 @@ void ParallelSearchInvariants() {
         BatchRecorder evaluator;
         MCTS search(ParallelOptions(mode, threads, batch, 200));
         GamePosition position;
+
         for (int move = 0; move < 3; ++move) {
           const auto moves = search.Search(position, evaluator);
           CHECK(search.CountInFlight() == 0);
-          // Playouts that stop at an unexpanded root add no child visit.
           CHECK(TotalVisits(moves) <= (move == 0 ? 200 : 200 + 200));
           CHECK(TotalVisits(moves) >= 200 - threads);
+
           for (const auto& recorded : evaluator.batches) {
             CHECK(!recorded.empty());
             CHECK(recorded.size() <= static_cast<size_t>(batch));
@@ -1002,9 +1013,6 @@ void ParallelSearchInvariants() {
 }
 
 void ParallelSearchSpreadsWorkers() {
-  // Eight workers first collide on the unexpanded root, then fill a second
-  // batch from the expanded root. Without a pre-update they all pick the same
-  // child; virtual loss and WU-PUCT must spread them over distinct children.
   for (ParallelMode mode : kParallelModes) {
     SearchOptions options = ParallelOptions(mode, 8, 8, 16);
     options.batch_timeout_us = 1'000'000;
@@ -1015,15 +1023,13 @@ void ParallelSearchSpreadsWorkers() {
     const auto start = std::chrono::steady_clock::now();
     search.Search(GamePosition(), evaluator, &timing);
     const auto elapsed = std::chrono::steady_clock::now() - start;
-    // Flushing once every worker waits avoids sitting out the 1 s timeout.
+
     CHECK(elapsed < std::chrono::milliseconds(500));
     CHECK(search.CountInFlight() == 0);
 
     CHECK(timing.playouts == 16);
     CHECK(timing.batches == static_cast<int>(evaluator.batches.size()));
     CHECK(timing.batched_positions == static_cast<int>(evaluator.positions()));
-    // Seven root collisions, plus seven more when every worker picks the
-    // same child without a pre-update.
     CHECK(timing.collisions == (mode == ParallelMode::kNone ? 14 : 7));
     CHECK(timing.inference_ms >= 0.0);
 
@@ -1033,10 +1039,13 @@ void ParallelSearchSpreadsWorkers() {
       CHECK(root.board().stone_count() == 0);
     }
 
+    // Virtual loss and WU-PUCT spread workers across distinct children.
     const auto& batch = evaluator.batches[1];
     CHECK(batch.size() == 8);
     std::vector<Action> leaves;
-    for (const GamePosition& leaf : batch) leaves.push_back(*leaf.last_move());
+    for (const GamePosition& leaf : batch) {
+      leaves.push_back(*leaf.last_move());
+    }
     std::sort(leaves.begin(), leaves.end());
     const auto distinct = static_cast<size_t>(
         std::unique(leaves.begin(), leaves.end()) - leaves.begin());
@@ -1047,6 +1056,7 @@ void ParallelSearchSpreadsWorkers() {
 void ThinkTimeLimit() {
   BatchRecorder evaluator;
   evaluator.delay = std::chrono::microseconds(200);
+
   SearchOptions options = ParallelOptions(ParallelMode::kWuPuct, 4, 2, 1);
   options.search_limit = SearchLimit::kThinkTime;
   options.think_time_ms = 60;
@@ -1055,9 +1065,9 @@ void ThinkTimeLimit() {
   const auto start = std::chrono::steady_clock::now();
   const auto moves = search.Search(GamePosition(), evaluator);
   const auto elapsed = std::chrono::steady_clock::now() - start;
+
   CHECK(elapsed >= std::chrono::milliseconds(60));
   CHECK(elapsed < std::chrono::milliseconds(300));
-  // num_playouts = 1 is ignored in think-time mode.
   CHECK(TotalVisits(moves) > 10);
   CHECK(search.CountInFlight() == 0);
 }
@@ -1080,7 +1090,8 @@ void ParallelSearchErrors() {
 
 void InferenceQueueBatching() {
   BatchRecorder evaluator;
-  // A full batch is sent at once, well before the 1 s timeout.
+
+  // Full batches and all-clients-waiting batches flush immediately.
   {
     InferenceQueue queue(evaluator, 2, std::chrono::seconds(1));
     std::vector<InferenceQueue::Client> clients;
@@ -1094,11 +1105,11 @@ void InferenceQueueBatching() {
       });
     }
     for (std::thread& thread : threads) thread.join();
+
     CHECK(std::chrono::steady_clock::now() - start <
           std::chrono::milliseconds(500));
     CHECK(evaluator.batches.size() == 1 && evaluator.batches[0].size() == 2);
 
-    // Disconnecting the idle clients lets a lone request go immediately.
     clients.pop_back();
     clients.pop_back();
     clients[0].Evaluate(GamePosition());
@@ -1109,12 +1120,12 @@ void InferenceQueueBatching() {
     CHECK(stats.inference_ms >= 0.0);
   }
 
-  // A partial batch is sent once the oldest request times out while another
-  // client stays connected but idle.
+  // Partial batches flush once the batch timeout expires.
   evaluator.batches.clear();
   InferenceQueue queue(evaluator, 4, std::chrono::milliseconds(30));
   InferenceQueue::Client waiting = queue.Connect();
   InferenceQueue::Client idle = queue.Connect();
+
   const auto start = std::chrono::steady_clock::now();
   waiting.Evaluate(GamePosition());
   CHECK(std::chrono::steady_clock::now() - start >=
@@ -1125,15 +1136,19 @@ void InferenceQueueBatching() {
 void InferenceQueueErrors() {
   BatchRecorder evaluator;
   evaluator.fail = true;
+
   InferenceQueue queue(evaluator, 1, std::chrono::milliseconds(1));
   InferenceQueue::Client client = queue.Connect();
   CheckThrows<std::runtime_error>([&] { client.Evaluate(GamePosition()); });
 
-  // The error sticks: later requests fail without calling the model.
   evaluator.fail = false;
   CheckThrows<std::runtime_error>([&] { client.Evaluate(GamePosition()); });
   CHECK(evaluator.batches.empty());
 }
+
+// ---------------------------------------------------------------------------
+// Move sampling
+// ---------------------------------------------------------------------------
 
 std::shared_ptr<FakeEvaluator> SamplingEvaluator(const GamePosition& position) {
   const auto actions = position.LegalActions();

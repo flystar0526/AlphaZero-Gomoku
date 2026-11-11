@@ -78,16 +78,18 @@ std::optional<float> ParseValue(const std::string& text, float*) {
 }
 
 void WriteValue(std::ostream& out, int value) { out << value; }
+
 void WriteValue(std::ostream& out, float value) { out << value; }
+
 void WriteValue(std::ostream& out, SearchLimit value) {
   out << kSearchLimitNames[static_cast<size_t>(value)];
 }
+
 void WriteValue(std::ostream& out, ParallelMode value) {
   out << kParallelModeNames[static_cast<size_t>(value)];
 }
 
-// Parses a single AI search option, falling back to default if unparsable.
-// Range rules are applied once the whole file has been read.
+// Parses a single AI search option, falling back to default on parse failure.
 void ParseSearchOption(std::string_view name, const std::string& text,
                        SearchOptions& options) {
   ForEachSearchOption([&](std::string_view option_name, auto member) {

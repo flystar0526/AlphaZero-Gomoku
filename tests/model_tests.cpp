@@ -71,19 +71,21 @@ int main(int argc, char** argv) {
       }
     }
 
-    // A batched forward pass must match per-position inference row by row.
-    // CUDA may pick different kernels per batch size, so allow float noise.
+    // Verify that batch inference matches single-position inference.
     GamePosition other = position;
     other.PlayMove(ToAction(7, 7));
+
     const std::vector<GamePosition> batch = {position, GamePosition(), other};
     const auto batched = network->EvaluateBatch(batch);
     if (batched.size() != batch.size()) {
       throw std::runtime_error("Batch inference returned the wrong row count");
     }
+
     constexpr float kBatchTolerance = 1e-3f;
     for (size_t row = 0; row < batch.size(); ++row) {
       const auto single = network->Evaluate(batch[row]);
       Validate(batched[row]);
+
       bool matches =
           std::abs(batched[row].value - single.value) <= kBatchTolerance;
       for (int i = 0; i < kActionCount; ++i) {
@@ -95,6 +97,7 @@ int main(int argc, char** argv) {
             "Batch inference differs from single inference");
       }
     }
+
     if (!network->EvaluateBatch({}).empty()) {
       throw std::runtime_error("Empty batch must return no evaluations");
     }

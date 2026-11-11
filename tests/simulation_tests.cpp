@@ -234,14 +234,16 @@ void AlternatingColorsAndLogs() {
             "expansion_ms,evaluation_ms,inference_ms,backup_ms,playouts,"
             "batches,batched_positions,collisions\n",
             0) == 0);
+
   const auto moves = ReadTable(moves_text);
   CHECK(moves.size() == 27);
+
+  constexpr size_t kMetrics = 6;
+  constexpr size_t kInference = 4;
 
   std::array<std::array<int, 2>, 2> counts{};
   std::array<int, 2> search_moves{};
   std::array<int, 2> search_playouts{};
-  constexpr size_t kMetrics = 6;
-  constexpr size_t kInference = 4;
   std::array<std::array<std::array<double, kMetrics>, 2>, 2> totals{};
   std::array<std::array<std::array<double, kMetrics>, 2>, 2> maxima{};
 
@@ -266,8 +268,7 @@ void AlternatingColorsAndLogs() {
       position.PlayMove(action);
       ++counts[player][color];
 
-      // With one worker the phases (excluding inference, which overlaps
-      // evaluation) fit inside the wall-clock think time.
+      // Verify per-move phase durations.
       double phase_sum = 0.0;
       for (size_t i = 0; i < kMetrics; ++i) {
         const double duration = std::stod(row[6 + i]);
@@ -279,13 +280,14 @@ void AlternatingColorsAndLogs() {
       CHECK(std::stod(row[6]) + 1e-5 >= phase_sum);
       CHECK(std::stod(row[10]) <= std::stod(row[9]) + 1e-5);
 
-      // Player 1 runs 1 playout and Player 2 runs 2 per move, one worker.
+      // Verify per-move search counters.
       const int playouts = std::stoi(row[12]);
       const int batches = std::stoi(row[13]);
       CHECK(playouts == static_cast<int>(player) + 1);
       CHECK(batches >= 1 && batches <= playouts);
       CHECK(std::stoi(row[14]) == batches);
       CHECK(row[15] == "0");
+
       ++search_moves[player];
       search_playouts[player] += playouts;
     }
@@ -333,19 +335,21 @@ void AlternatingColorsAndLogs() {
             "total_batches,mean_batches,total_batched_positions,"
             "mean_batched_positions,total_collisions,mean_collisions,"
             "mean_batch_size\n") != std::string::npos);
+
   const auto search = ReadTable(summary, "search");
   CHECK(search.size() == 6);
   for (size_t player = 0; player < 2; ++player) {
     const auto& all = search[player * 3 + 2];
+    CHECK(all.size() == 12);
     CHECK(all[1] == "all");
     CHECK(std::stoi(all[2]) == search_moves[player]);
-    CHECK(all.size() == 12);
     CHECK(std::stoi(all[3]) == search_playouts[player]);
     CHECK(std::stod(all[4]) == static_cast<double>(player + 1));
-    CHECK(all[5] == all[7]);  // Batches and batched positions agree.
+    CHECK(all[5] == all[7]);
     CHECK(all[9] == "0" && all[10] == "0.000000");
     CHECK(all[11] == "1.000000");
   }
+
   CHECK(progress.str().find("Game 3/3:") != std::string::npos);
 
   options.num_games = 1;

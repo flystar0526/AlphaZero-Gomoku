@@ -48,13 +48,10 @@ class PhaseTimer {
   Clock::time_point start_;
 };
 
-// Test-and-test-and-set spinlock guarding one tree node.
+// Lightweight spinlock for synchronizing access to a tree node.
 class SpinLock {
  public:
   SpinLock() = default;
-
-  // Nodes are only copied or moved while no search is running, so the copy
-  // simply starts unlocked. This keeps TreeNode storable in std::vector.
   SpinLock(const SpinLock&) noexcept {}
   SpinLock& operator=(const SpinLock&) noexcept { return *this; }
 
@@ -72,7 +69,7 @@ class SpinLock {
   std::atomic<bool> locked_{false};
 };
 
-// Joins its threads on destruction, including during stack unwinding.
+// RAII container that joins all spawned threads on destruction.
 class ThreadGroup {
  public:
   explicit ThreadGroup(size_t capacity) { threads_.reserve(capacity); }
@@ -93,8 +90,7 @@ class ThreadGroup {
   std::vector<std::thread> threads_;
 };
 
-// A validation rule for SearchOptions: the check, the message shown when it
-// fails, and the field reset to its default to repair it.
+// Validation rule pairing a predicate, error message, and default resetter.
 struct OptionRule {
   bool (*holds)(const SearchOptions&);
   const char* message;
@@ -106,43 +102,66 @@ void ResetField(SearchOptions& options) {
   options.*Field = SearchOptions{}.*Field;
 }
 
-// Cross-field rules come last so Sanitized() checks them after every field
-// has its own valid value.
 const OptionRule kOptionRules[] = {
-    {[](const SearchOptions& o) { return o.num_playouts > 0; },
-     "num_playouts must be > 0", ResetField<&SearchOptions::num_playouts>},
-    {[](const SearchOptions& o) { return o.think_time_ms > 0; },
-     "think_time_ms must be > 0", ResetField<&SearchOptions::think_time_ms>},
-    {[](const SearchOptions& o) {
-       return std::isfinite(o.c_puct) && o.c_puct > 0.0f;
-     },
-     "c_puct must be > 0", ResetField<&SearchOptions::c_puct>},
-    {[](const SearchOptions& o) {
-       return std::isfinite(o.temperature) && o.temperature >= 0.0f;
-     },
-     "temperature must be >= 0", ResetField<&SearchOptions::temperature>},
-    {[](const SearchOptions& o) {
-       return o.num_sampling_moves >= 0 &&
-              o.num_sampling_moves <= kActionCount;
-     },
-     "num_sampling_moves must be in 0..225",
-     ResetField<&SearchOptions::num_sampling_moves>},
-    {[](const SearchOptions& o) {
-       return std::isfinite(o.virtual_loss) && o.virtual_loss > 0.0f;
-     },
-     "virtual_loss must be > 0", ResetField<&SearchOptions::virtual_loss>},
-    {[](const SearchOptions& o) {
-       return o.num_threads > 0 && o.num_threads <= SearchOptions::kMaxThreads;
-     },
-     "num_threads must be in 1..64", ResetField<&SearchOptions::num_threads>},
-    {[](const SearchOptions& o) { return o.batch_timeout_us > 0; },
-     "batch_timeout_us must be > 0",
-     ResetField<&SearchOptions::batch_timeout_us>},
-    {[](const SearchOptions& o) {
-       return o.batch_size > 0 && o.batch_size <= o.num_threads;
-     },
-     "batch_size must be in 1..num_threads",
-     ResetField<&SearchOptions::batch_size>},
+    {
+        [](const SearchOptions& o) { return o.num_playouts > 0; },
+        "num_playouts must be > 0",
+        ResetField<&SearchOptions::num_playouts>,
+    },
+    {
+        [](const SearchOptions& o) { return o.think_time_ms > 0; },
+        "think_time_ms must be > 0",
+        ResetField<&SearchOptions::think_time_ms>,
+    },
+    {
+        [](const SearchOptions& o) {
+          return std::isfinite(o.c_puct) && o.c_puct > 0.0f;
+        },
+        "c_puct must be > 0",
+        ResetField<&SearchOptions::c_puct>,
+    },
+    {
+        [](const SearchOptions& o) {
+          return std::isfinite(o.temperature) && o.temperature >= 0.0f;
+        },
+        "temperature must be >= 0",
+        ResetField<&SearchOptions::temperature>,
+    },
+    {
+        [](const SearchOptions& o) {
+          return o.num_sampling_moves >= 0 &&
+                 o.num_sampling_moves <= kActionCount;
+        },
+        "num_sampling_moves must be in 0..225",
+        ResetField<&SearchOptions::num_sampling_moves>,
+    },
+    {
+        [](const SearchOptions& o) {
+          return std::isfinite(o.virtual_loss) && o.virtual_loss > 0.0f;
+        },
+        "virtual_loss must be > 0",
+        ResetField<&SearchOptions::virtual_loss>,
+    },
+    {
+        [](const SearchOptions& o) {
+          return o.num_threads > 0 &&
+                 o.num_threads <= SearchOptions::kMaxThreads;
+        },
+        "num_threads must be in 1..64",
+        ResetField<&SearchOptions::num_threads>,
+    },
+    {
+        [](const SearchOptions& o) { return o.batch_timeout_us > 0; },
+        "batch_timeout_us must be > 0",
+        ResetField<&SearchOptions::batch_timeout_us>,
+    },
+    {
+        [](const SearchOptions& o) {
+          return o.batch_size > 0 && o.batch_size <= o.num_threads;
+        },
+        "batch_size must be in 1..num_threads",
+        ResetField<&SearchOptions::batch_size>,
+    },
 };
 
 static_assert(kActionCount == 225 && SearchOptions::kMaxThreads == 64,
@@ -151,204 +170,7 @@ static_assert(kActionCount == 225 && SearchOptions::kMaxThreads == 64,
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// MCTS::TreeNode
-// ---------------------------------------------------------------------------
-
-// Locking rule: a node's `lock` guards its `children` vector and the
-// statistics of each child. The root's own statistics are guarded by the
-// root's lock. Workers never hold two locks at once.
-struct MCTS::TreeNode {
-  TreeNode* parent = nullptr;
-  Action action = kNoAction;
-  float prior = 0.0f;
-
-  // Edge statistics, guarded by the parent's lock (the root's own lock).
-  int visits = 0;
-  float value_sum = 0.0f;
-  int in_flight = 0;  // Simulations that passed this node but not backed up.
-
-  SpinLock lock;
-  std::vector<TreeNode> children;  // Empty until expanded; then immutable.
-
-  TreeNode(TreeNode* parent, Action action, float prior)
-      : parent(parent), action(action), prior(prior) {}
-
-  SpinLock& stats_lock() { return parent ? parent->lock : lock; }
-
-  float MeanValue() const {
-    return visits > 0 ? value_sum / static_cast<float>(visits) : 0.0f;
-  }
-};
-
-// ---------------------------------------------------------------------------
-// MCTS::Worker
-// ---------------------------------------------------------------------------
-
-// One search thread. Runs playouts on the shared tree until the search
-// budget is spent or another thread fails.
-class MCTS::Worker {
- public:
-  Worker(const SearchOptions& options, TreeNode& root,
-         const GamePosition& position)
-      : options_(options), root_(root), position_(position) {}
-
-  // Runs one simulation: select, evaluate, expand, and back up.
-  void Playout(InferenceQueue::Client& queue) {
-    GamePosition position = position_;
-    path_.clear();
-
-    // 1. Selection, applying the pre-update to every node on the path.
-    TreeNode* node = &root_;
-    {
-      PhaseTimer timer(&timing_, &SearchTiming::selection_ms);
-      float parent_count;
-      {
-        std::lock_guard guard(node->lock);
-        parent_count = ExplorationCount(*node);
-        ++node->in_flight;
-      }
-      path_.push_back(node);
-
-      while (true) {
-        TreeNode* child;
-        {
-          std::lock_guard guard(node->lock);
-          if (node->children.empty()) break;
-          child = SelectChild(*node, parent_count);
-          parent_count = ExplorationCount(*child);
-          ++child->in_flight;
-        }
-        position.PlayMove(child->action);
-        node = child;
-        path_.push_back(node);
-      }
-    }
-
-    // 2. Evaluation and expansion.
-    float leaf_value = 0.0f;
-    if (position.is_terminal()) {
-      if (position.winner().has_value()) {
-        leaf_value =
-            (*position.winner() == position.current_player()) ? 1.0f : -1.0f;
-      }
-    } else {
-      Evaluation evaluation;
-      {
-        PhaseTimer timer(&timing_, &SearchTiming::evaluation_ms);
-        evaluation = queue.Evaluate(position);
-      }
-      leaf_value = evaluation.value;
-
-      PhaseTimer timer(&timing_, &SearchTiming::expansion_ms);
-      std::vector<TreeNode> children = MakeChildren(node, position, evaluation);
-      std::lock_guard guard(node->lock);
-      // Another worker may have expanded this leaf while we waited; keep its
-      // children and only back up our value.
-      if (node->children.empty()) {
-        node->children = std::move(children);
-      } else {
-        ++timing_.collisions;
-      }
-    }
-
-    // 3. Backup, reverting the pre-update along the same path.
-    PhaseTimer timer(&timing_, &SearchTiming::backup_ms);
-    float value = -leaf_value;
-    for (auto it = path_.rbegin(); it != path_.rend(); ++it) {
-      TreeNode& path_node = **it;
-      {
-        std::lock_guard guard(path_node.stats_lock());
-        --path_node.in_flight;
-        ++path_node.visits;
-        path_node.value_sum += value;
-      }
-      value = -value;
-    }
-    ++timing_.playouts;
-  }
-
-  const SearchTiming& timing() const { return timing_; }
-
- private:
-  // Visit count used in the exploration term, including in-flight
-  // simulations for virtual loss and WU-PUCT.
-  float ExplorationCount(const TreeNode& node) const {
-    switch (options_.parallel_mode) {
-      case ParallelMode::kVirtualLoss:
-        return static_cast<float>(node.visits) +
-               options_.virtual_loss * static_cast<float>(node.in_flight);
-      case ParallelMode::kWuPuct:
-        return static_cast<float>(node.visits + node.in_flight);
-      case ParallelMode::kNone:
-        break;
-    }
-    return static_cast<float>(node.visits);
-  }
-
-  // Mean value used for exploitation. Virtual loss counts each in-flight
-  // simulation as `virtual_loss` lost games.
-  float ExploitationValue(const TreeNode& node) const {
-    if (options_.parallel_mode != ParallelMode::kVirtualLoss) {
-      return node.MeanValue();
-    }
-    const float loss =
-        options_.virtual_loss * static_cast<float>(node.in_flight);
-    const float visits = static_cast<float>(node.visits) + loss;
-    return visits > 0.0f ? (node.value_sum - loss) / visits : 0.0f;
-  }
-
-  // Selects the child with the highest PUCT score (Q + U). Caller holds
-  // `node.lock`.
-  TreeNode* SelectChild(TreeNode& node, float parent_count) const {
-    TreeNode* best_child = nullptr;
-    float best_score = -std::numeric_limits<float>::infinity();
-    const float exploration_factor = options_.c_puct * std::sqrt(parent_count);
-
-    for (TreeNode& child : node.children) {
-      const float u_value = exploration_factor * child.prior /
-                            (1.0f + ExplorationCount(child));
-      const float score = ExploitationValue(child) + u_value;
-      if (score > best_score) {
-        best_score = score;
-        best_child = &child;
-      }
-    }
-    return best_child;
-  }
-
-  // Builds children for every legal move with priors renormalized over legal
-  // actions (uniform if the policy gives them no mass).
-  static std::vector<TreeNode> MakeChildren(TreeNode* node,
-                                            const GamePosition& position,
-                                            const Evaluation& evaluation) {
-    const std::vector<Action> legal_actions = position.LegalActions();
-    double policy_sum = 0.0;
-    for (Action action : legal_actions) {
-      policy_sum += evaluation.policy[action];
-    }
-
-    const float uniform_prior = 1.0f / static_cast<float>(legal_actions.size());
-    std::vector<TreeNode> children;
-    children.reserve(legal_actions.size());
-    for (Action action : legal_actions) {
-      const float prior =
-          (policy_sum > 0.0)
-              ? static_cast<float>(evaluation.policy[action] / policy_sum)
-              : uniform_prior;
-      children.emplace_back(node, action, prior);
-    }
-    return children;
-  }
-
-  const SearchOptions& options_;
-  TreeNode& root_;
-  const GamePosition& position_;
-  SearchTiming timing_;
-  std::vector<TreeNode*> path_;
-};
-
-// ---------------------------------------------------------------------------
-// MCTS
+// SearchOptions
 // ---------------------------------------------------------------------------
 
 std::vector<std::string> SearchOptions::Validate() const {
@@ -367,6 +189,209 @@ SearchOptions SearchOptions::Sanitized() const {
   assert(options.IsValid());
   return options;
 }
+
+// ---------------------------------------------------------------------------
+// MCTS::TreeNode
+// ---------------------------------------------------------------------------
+
+// A node in the MCTS search tree. Each node's lock guards its children list
+// and the statistics of its outgoing child edges.
+struct MCTS::TreeNode {
+  TreeNode* parent = nullptr;
+  Action action = kNoAction;
+  float prior = 0.0f;
+
+  int visits = 0;
+  float value_sum = 0.0f;
+  int in_flight = 0;
+
+  SpinLock lock;
+  std::vector<TreeNode> children;
+
+  TreeNode(TreeNode* parent, Action action, float prior)
+      : parent(parent), action(action), prior(prior) {}
+
+  SpinLock& stats_lock() { return parent ? parent->lock : lock; }
+
+  float MeanValue() const {
+    return visits > 0 ? value_sum / static_cast<float>(visits) : 0.0f;
+  }
+};
+
+// ---------------------------------------------------------------------------
+// MCTS::Worker
+// ---------------------------------------------------------------------------
+
+// Executes playouts on the shared search tree for a single worker thread.
+class MCTS::Worker {
+ public:
+  Worker(const SearchOptions& options, TreeNode& root,
+         const GamePosition& position)
+      : options_(options), root_(root), position_(position) {}
+
+  // Runs one simulation: select, evaluate, expand, and back up.
+  void Playout(InferenceQueue::Client& queue) {
+    GamePosition position = position_;
+    TreeNode* leaf = SelectLeaf(position);
+
+    float leaf_value = 0.0f;
+    if (position.is_terminal()) {
+      if (position.winner().has_value()) {
+        leaf_value =
+            (*position.winner() == position.current_player()) ? 1.0f : -1.0f;
+      }
+    } else {
+      Evaluation evaluation;
+      {
+        PhaseTimer timer(&timing_, &SearchTiming::evaluation_ms);
+        evaluation = queue.Evaluate(position);
+      }
+      leaf_value = evaluation.value;
+
+      Expand(*leaf, position, evaluation);
+    }
+
+    Backup(leaf_value);
+    ++timing_.playouts;
+  }
+
+  const SearchTiming& timing() const { return timing_; }
+
+ private:
+  // Traverses the tree from the root to a leaf node using PUCT selection.
+  TreeNode* SelectLeaf(GamePosition& position) {
+    PhaseTimer timer(&timing_, &SearchTiming::selection_ms);
+    path_.clear();
+
+    TreeNode* node = &root_;
+    float parent_count = 0.0f;
+    {
+      std::lock_guard guard(node->lock);
+      parent_count = ExplorationCount(*node);
+      ++node->in_flight;
+    }
+    path_.push_back(node);
+
+    while (true) {
+      TreeNode* child = nullptr;
+      {
+        std::lock_guard guard(node->lock);
+        if (node->children.empty()) break;
+
+        child = SelectChild(*node, parent_count);
+        parent_count = ExplorationCount(*child);
+        ++child->in_flight;
+      }
+
+      position.PlayMove(child->action);
+      node = child;
+      path_.push_back(node);
+    }
+
+    return node;
+  }
+
+  // Expands `leaf` with legal moves and normalized policy priors.
+  void Expand(TreeNode& leaf, const GamePosition& position,
+              const Evaluation& evaluation) {
+    PhaseTimer timer(&timing_, &SearchTiming::expansion_ms);
+
+    const std::vector<Action> legal_actions = position.LegalActions();
+    double policy_sum = 0.0;
+    for (Action action : legal_actions) {
+      policy_sum += evaluation.policy[action];
+    }
+
+    const float uniform_prior = 1.0f / static_cast<float>(legal_actions.size());
+    std::vector<TreeNode> children;
+    children.reserve(legal_actions.size());
+    for (Action action : legal_actions) {
+      const float prior =
+          (policy_sum > 0.0)
+              ? static_cast<float>(evaluation.policy[action] / policy_sum)
+              : uniform_prior;
+      children.emplace_back(&leaf, action, prior);
+    }
+
+    std::lock_guard guard(leaf.lock);
+    if (leaf.children.empty()) {
+      leaf.children = std::move(children);
+    } else {
+      ++timing_.collisions;
+    }
+  }
+
+  // Propagates `leaf_value` back along the selected path to the root.
+  void Backup(float leaf_value) {
+    PhaseTimer timer(&timing_, &SearchTiming::backup_ms);
+
+    float value = -leaf_value;
+    for (auto it = path_.rbegin(); it != path_.rend(); ++it) {
+      TreeNode& node = **it;
+      {
+        std::lock_guard guard(node.stats_lock());
+        --node.in_flight;
+        ++node.visits;
+        node.value_sum += value;
+      }
+      value = -value;
+    }
+  }
+
+  // Returns the visit count adjusted for the active parallel exploration mode.
+  float ExplorationCount(const TreeNode& node) const {
+    switch (options_.parallel_mode) {
+      case ParallelMode::kVirtualLoss:
+        return static_cast<float>(node.visits) +
+               options_.virtual_loss * static_cast<float>(node.in_flight);
+      case ParallelMode::kWuPuct:
+        return static_cast<float>(node.visits + node.in_flight);
+      case ParallelMode::kNone:
+        break;
+    }
+    return static_cast<float>(node.visits);
+  }
+
+  // Returns the mean value adjusted for virtual loss when enabled.
+  float ExploitationValue(const TreeNode& node) const {
+    if (options_.parallel_mode != ParallelMode::kVirtualLoss) {
+      return node.MeanValue();
+    }
+
+    const float loss =
+        options_.virtual_loss * static_cast<float>(node.in_flight);
+    const float visits = static_cast<float>(node.visits) + loss;
+    return visits > 0.0f ? (node.value_sum - loss) / visits : 0.0f;
+  }
+
+  // Selects the child with the highest PUCT score (Q + U).
+  TreeNode* SelectChild(TreeNode& node, float parent_count) const {
+    TreeNode* best_child = nullptr;
+    float best_score = -std::numeric_limits<float>::infinity();
+    const float exploration_factor = options_.c_puct * std::sqrt(parent_count);
+
+    for (TreeNode& child : node.children) {
+      const float u_value = exploration_factor * child.prior /
+                            (1.0f + ExplorationCount(child));
+      const float score = ExploitationValue(child) + u_value;
+      if (score > best_score) {
+        best_score = score;
+        best_child = &child;
+      }
+    }
+    return best_child;
+  }
+
+  const SearchOptions& options_;
+  TreeNode& root_;
+  const GamePosition& position_;
+  SearchTiming timing_;
+  std::vector<TreeNode*> path_;
+};
+
+// ---------------------------------------------------------------------------
+// MCTS
+// ---------------------------------------------------------------------------
 
 MCTS::MCTS(SearchOptions options) : options_(options) {
   if (!options_.IsValid()) {
@@ -388,8 +413,6 @@ std::vector<MoveVisits> MCTS::Search(const GamePosition& position,
   InferenceQueue queue(evaluator, options_.batch_size,
                        std::chrono::microseconds(options_.batch_timeout_us));
 
-  // Connect every client before any worker starts so the first batch waits
-  // for all of them.
   std::vector<Worker> workers;
   std::vector<InferenceQueue::Client> clients;
   workers.reserve(num_workers);
@@ -399,11 +422,12 @@ std::vector<MoveVisits> MCTS::Search(const GamePosition& position,
     clients.push_back(queue.Connect());
   }
 
-  // Search budget shared by all workers.
+  // Shared playout budget across all worker threads.
   std::atomic<int> dispatched{0};
   std::atomic<bool> stop{false};
   const Clock::time_point deadline =
       Clock::now() + std::chrono::milliseconds(options_.think_time_ms);
+
   const auto claim_playout = [&] {
     if (stop.load(std::memory_order_relaxed)) return false;
     if (options_.search_limit == SearchLimit::kThinkTime) {
@@ -413,14 +437,13 @@ std::vector<MoveVisits> MCTS::Search(const GamePosition& position,
            options_.num_playouts;
   };
 
+  // Run worker threads and capture the first evaluator error, if any.
   std::mutex error_mutex;
   std::exception_ptr first_error;
 
   {
     ThreadGroup threads(num_workers);
     for (int i = 0; i < num_workers; ++i) {
-      // Each thread owns its client, so the queue stops waiting for a worker
-      // as soon as that worker's thread ends.
       threads.Spawn([&, worker = &workers[i],
                      client = std::move(clients[i])]() mutable {
         try {
@@ -435,7 +458,6 @@ std::vector<MoveVisits> MCTS::Search(const GamePosition& position,
   }
 
   if (first_error) {
-    // Interrupted playouts leave pre-updates behind, so drop the tree.
     Reset();
     std::rethrow_exception(first_error);
   }
@@ -483,11 +505,14 @@ void MCTS::Reset() {
 int MCTS::CountInFlight() const {
   int total = 0;
   std::vector<const TreeNode*> stack = {root_.get()};
+
   while (!stack.empty()) {
     const TreeNode* node = stack.back();
     stack.pop_back();
     total += node->in_flight;
-    for (const TreeNode& child : node->children) stack.push_back(&child);
+    for (const TreeNode& child : node->children) {
+      stack.push_back(&child);
+    }
   }
   return total;
 }

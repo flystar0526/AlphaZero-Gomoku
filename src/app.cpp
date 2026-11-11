@@ -609,7 +609,6 @@ void App::DrawSettings() {
   ImGui::TextDisabled(
       "Set temperature or num_sampling_moves to 0 to disable sampling.");
 
-  // One column per AI player so both fit without scrolling.
   constexpr float kInputWidth = 150.0f;
 
   std::vector<std::string> violations;
@@ -617,31 +616,40 @@ void App::DrawSettings() {
     for (AIPlayerId player : {AIPlayerId::kPlayer1, AIPlayerId::kPlayer2}) {
       ImGui::TableNextColumn();
       ImGui::PushID(static_cast<int>(player));
+
       const char* name =
           player == AIPlayerId::kPlayer1 ? "AI Player 1" : "AI Player 2";
       ImGui::TextUnformatted(name);
 
       auto& options = settings_ai_options_[static_cast<size_t>(player)];
+
+      // Search budget.
       int search_limit = static_cast<int>(options.search_limit);
       ImGui::SetNextItemWidth(kInputWidth);
       if (ImGui::Combo("search_limit", &search_limit, kSearchLimitNames,
                        IM_ARRAYSIZE(kSearchLimitNames))) {
         options.search_limit = static_cast<SearchLimit>(search_limit);
       }
+
       ImGui::SetNextItemWidth(kInputWidth);
       if (options.search_limit == SearchLimit::kPlayouts) {
         ImGui::InputInt("num_playouts", &options.num_playouts);
       } else {
         ImGui::InputInt("think_time_ms", &options.think_time_ms, 100, 1000);
       }
+
+      // Exploration and move sampling.
       ImGui::SetNextItemWidth(kInputWidth);
       ImGui::InputFloat("c_puct", &options.c_puct, 0.1f, 1.0f, "%.6g");
+
       ImGui::SetNextItemWidth(kInputWidth);
       ImGui::InputFloat("temperature", &options.temperature, 0.1f, 1.0f,
                         "%.6g");
+
       ImGui::SetNextItemWidth(kInputWidth);
       ImGui::InputInt("num_sampling_moves", &options.num_sampling_moves);
 
+      // Parallel search and batching.
       ImGui::Spacing();
       int parallel_mode = static_cast<int>(options.parallel_mode);
       ImGui::SetNextItemWidth(kInputWidth);
@@ -649,15 +657,19 @@ void App::DrawSettings() {
                        IM_ARRAYSIZE(kParallelModeNames))) {
         options.parallel_mode = static_cast<ParallelMode>(parallel_mode);
       }
+
       if (options.parallel_mode == ParallelMode::kVirtualLoss) {
         ImGui::SetNextItemWidth(kInputWidth);
         ImGui::InputFloat("virtual_loss", &options.virtual_loss, 0.1f, 1.0f,
                           "%.6g");
       }
+
       ImGui::SetNextItemWidth(kInputWidth);
       ImGui::InputInt("num_threads", &options.num_threads);
+
       ImGui::SetNextItemWidth(kInputWidth);
       ImGui::InputInt("batch_size", &options.batch_size);
+
       ImGui::SetNextItemWidth(kInputWidth);
       ImGui::InputInt("batch_timeout_us", &options.batch_timeout_us, 100,
                       1000);
@@ -665,6 +677,7 @@ void App::DrawSettings() {
       for (const std::string& violation : options.Validate()) {
         violations.push_back(std::string(name) + ": " + violation);
       }
+
       ImGui::PopID();
     }
     ImGui::EndTable();

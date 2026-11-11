@@ -11,32 +11,25 @@
 #include "game_position.h"
 #include "policy_value_network.h"
 
-// Batches positions from several client threads into EvaluateBatch calls made
-// on one evaluator thread. A batch is sent when `batch_size` positions are
-// waiting, when every connected client is waiting, or when the oldest request
-// has waited `timeout`.
+// Collects evaluation requests from worker threads into batched evaluator calls.
 class InferenceQueue {
  public:
   class Client;
 
+  // Accumulated batch evaluation metrics.
   struct Stats {
-    double inference_ms = 0.0;  // Time spent in EvaluateBatch.
+    double inference_ms = 0.0;
     std::int64_t batches = 0;
     std::int64_t batched_positions = 0;
   };
 
-  // Starts the evaluator thread.
   InferenceQueue(PolicyValueEvaluator& evaluator, int batch_size,
                  std::chrono::microseconds timeout);
-
   InferenceQueue(const InferenceQueue&) = delete;
   InferenceQueue& operator=(const InferenceQueue&) = delete;
-
-  // Stops the evaluator thread. Every client must be gone by then.
   ~InferenceQueue();
 
-  // Registers a client. Connect every client before any of them calls
-  // Evaluate, so the queue knows how many requests a batch can wait for.
+  // Registers a worker client with the queue.
   Client Connect();
 
   Stats stats() const;
@@ -65,8 +58,7 @@ class InferenceQueue {
   std::thread evaluator_thread_;
 };
 
-// A handle for submitting positions. Destroying it tells the queue that this
-// client will send no more requests, so batches stop waiting for it.
+// Worker handle for submitting positions to an InferenceQueue.
 class InferenceQueue::Client {
  public:
   Client(Client&& other) noexcept : queue_(other.queue_) {
@@ -79,8 +71,7 @@ class InferenceQueue::Client {
     if (queue_) queue_->Disconnect();
   }
 
-  // Blocks until `position` has been evaluated. Rethrows the evaluator's
-  // error if any batch has failed.
+  // Submits `position` for batched evaluation and returns its result.
   Evaluation Evaluate(const GamePosition& position) {
     return queue_->Evaluate(position);
   }
